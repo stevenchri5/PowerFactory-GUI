@@ -71,6 +71,19 @@ COM_MAX_KW   = 100.0                                                        # ca
 IND_MAX_KW   = 100.0                                                        # cap for industrial sites
 SCH_MAX_KW   = 25.0                                                         # cap for school site
 
+# 1.8 Helper function to safely fetch attributes from PowerFactory objects
+def _get_attr(obj, *candidates):
+    """Return the first non-None attribute among the candidate names."""
+    for name in candidates:                                                 # Loop through each candidate attribute name provided
+        try:
+            val = obj.GetAttribute(name)                                    # Try to get the attribute from the PowerFactory object
+            if val is not None:                                             # If the attribute exists and is not None, return it immediately
+                return val
+        except Exception:                                                   # If the attribute does not exist or can't be accessed, ignore the error and continue
+            pass
+    return None                                                             # If none of the candidates worked, return None as a safe fallback
+
+
 
 
 # =====================================================================================================================================================
@@ -107,6 +120,34 @@ def get_bus_objects(app):
     for term in app.GetCalcRelevantObjects("*.ElmTerm") or []:              # :contentReference[oaicite:9]{index=9}  # iterate LV/HV terminals in the active calc scope
         buses[term.loc_name] = term                                         # map human-readable name to the terminal object
     return buses                                                            # return the mapping for quick lookups by name
+
+# 2.3.1 Bus-name resolver — map configured names to actual PF terminal names
+def _resolve_bus_name(config_bus: str, bus_dict: dict):
+    """
+    Return the actual terminal name from bus_dict that best matches config_bus.
+    Priority: exact match -> common LV suffix -> startswith -> contains -> None.
+    """
+    # 1) Exact match
+    if config_bus in bus_dict:
+        return config_bus
+
+    # 2) Common LV suffix used in many models (e.g., "OTKa" -> "OTKa_0.415")
+    cand = f"{config_bus}_0.415"
+    if cand in bus_dict:
+        return cand
+
+    # 3) Name starts with configured token (e.g., "OTKa" matches "OTKa LV Bus")
+    for name in bus_dict:
+        if name.startswith(config_bus):
+            return name
+
+    # 4) Fuzzy contains as last resort
+    for name in bus_dict:
+        if config_bus in name:
+            return name
+
+    # 5) No match
+    return None
 
 # 2.4 Find the PV object that the GUI is asking for
 def get_pv_objects(app):
@@ -321,8 +362,251 @@ def _configure_qds(app):
 
     return qds                                                              # may be None; caller decides on snapshot fallback
 
+# 4.8 ElmRes helpers — locate results table and read columns safely
+
+def _get_elmres(app):
+    """
+    Return the first results table (ElmRes) in calc-relevant scope, or None.
+    """
+    try:
+        res_list = app.GetCalcRelevantObjects("*.ElmRes") or []
+        return res_list[0] if res_list else None
+    except Exception:
+        return None
+
+def _elmres_series(res, col_name_candidates):
+    """
+    Try each candidate column name in ElmRes; return [(t, v), ...] if found, else [].
+    Assumes column 0 is time (seconds). Tolerant to missing columns.
+    """
+    if not res:
+        return []
+    # Find a usable column index
+    col_idx = -1
+    for name in col_name_candidates:
+        try:
+            idx = res.FindColumn(name)  # returns -1 if not found
+            if idx is not None and int(idx) >= 0:
+                col_idx = int(idx)
+                break
+        except Exception:
+            pass
+    if col_idx < 0:
+        return []
+
+    # Read all rows: time = col 0, value = chosen column
+    out = []
+    try:
+        nrows = int(res.GetRowCount() or 0)
+    except Exception:
+        nrows = 0
+
+    for r in range(nrows):
+        try:
+            t = float(res.GetValue(r, 0))          # time column (seconds)
+            v = res.GetValue(r, col_idx)           # the value we want
+            if v is None:
+                continue
+            out.append((t, float(v)))
+        except Exception:
+            # ignore bad rows and keep going
+            continue
+    return out
+
+# 4.9 Ensure QDS Variables set (auto builder)
+def _ensure_qds_varset(app, qds, buses_map, net):
+    """
+    Make sure the QDS command has a Variables set with all channels we need,
+    create/update it if required, and attach it to qds.p_resvar.
+    """
+    sc = app.GetActiveStudyCase()
+
+    # Find or create the SetVar under the Study Case
+    name = "QDS Variables (auto)"
+    existing = sc.GetContents(f"{name}.SetVar")
+    vset = existing[0] if existing else sc.CreateObject("SetVar", name)
+
+    # Try to clear it (PF versions differ on the API name)
+    for clear_fn in ("Clear", "Reset", "DeleteAll"):
+        fn = getattr(vset, clear_fn, None)
+        if fn:
+            try:
+                fn()
+                break
+            except Exception:
+                pass
+
+    # Helper to add one result channel, tolerating PF version differences
+    def _add(vset_obj, pf_obj, var_name):
+        for meth in ("Add", "AddVar", "AddVars", "AddVariable"):
+            fn = getattr(vset_obj, meth, None)
+            if fn:
+                try:
+                    # Most builds accept (object, "var"); some accept ("var", object)
+                    try:
+                        return fn(pf_obj, var_name)
+                    except Exception:
+                        return fn(var_name, pf_obj)
+                except Exception:
+                    pass
+        # Last resort on some installs
+        fn = getattr(vset_obj, "AddResVars", None)
+        if fn:
+            try:
+                return fn(pf_obj, var_name)
+            except Exception:
+                pass
+        # Don’t crash the run; just skip silently
+        app.PrintWarn(f"6.4a ⚠️ Couldn’t add var '{var_name}' for {getattr(pf_obj, 'loc_name', pf_obj)}")
+
+    # 4.9.1 Buses: per‑unit voltage (try m:u then m:u1)
+    for _, term in buses_map.items():
+        if not _add(vset, term, "m:u"):
+            _add(vset, term, "m:u1")
+
+    # 4.9.2 Lines & transformers: loading %
+    for ln in net.get("lines", []):
+        _add(vset, ln, "c:loading")
+    for tr in net.get("trafos", []):
+        _add(vset, tr, "c:loading")
+
+    # 4.9.3 Loads & PVs: active power
+    for ld in net.get("loads", []):
+        if not _add(vset, ld, "m:Psum"):
+            _add(vset, ld, "m:P")
+
+    pv_objs, _ = get_pv_objects(app)
+    for _key, pv in pv_objs.items():
+        if not _add(vset, pv, "m:Psum"):
+            _add(vset, pv, "m:P")
+
+    # Attach the Variables set to the QDS command
+    try:
+        qds.p_resvar = vset
+        app.PrintPlain(f"6.4a ✅ Attached Variables set: {vset.loc_name}")
+    except Exception as e:
+        app.PrintWarn(f"6.4a ⚠️ Couldn’t attach Variables set (p_resvar): {e}")
+
+    return vset
 
 
+# =====================================================================================================================================================
+# =====================================================================================================================================================
+# 5.0 ---------- Snapshot sweep (Fallback if QDS is playing silly buggers) 
+# =====================================================================================================================================================
+# =====================================================================================================================================================
+
+
+# # 5.1 Run 24 hourly sim, gather voltages/loads/PV and store values
+# def run_snapshot_24h(app):
+#     """
+#     Runs 24 hourly load flows and collects: bus pu, PV kW, loads kW, line/trafo loading %.
+#     Uses a simple PV shape multiplier to emulate time-of-day if model lacks time-series.
+#     """
+#     ldf     = _get_ldf(app)                                                 # obtain a Load Flow command object for executing snapshots
+#     buses   = get_bus_objects(app)                                          # map of bus name → terminal object for voltage reads
+#     pv_objs, _ = get_pv_objects(app)                                        # pv_key → PV object (ignore missing list here)
+#     net     = discover_network_elements(app)                                # discover lines/transformers/loads for loading & totals
+
+# # 5.1.1 Storage for time-series that builds as sweep hours
+#     bus_u      = {b: [] for b in buses}                                     # bus name → list of (t, pu) voltage tuples
+#     pv_p_kw    = {k: [] for k in pv_objs}                                   # pv_key → list of (t, kW) output tuples
+#     load_kw    = []                                                         # total load time-series (t, kW) across all loads
+#     line_load  = {ln.loc_name: [] for ln in net["lines"]}                   # line name → list of (t, %) loading tuples
+#     trafo_load = {tr.loc_name: [] for tr in net["trafos"]}                  # trafo name → list of (t, %) loading tuples
+
+#     times = _times_24h()[:-1]                                               # 0..23 hours in seconds (exclude 24:00 end)
+#     for idx, t in enumerate(times):                                         # iterate each hourly timestamp
+#         hour = t // 3600                                                    # integer hour index (0..23)
+
+# # 5.1.2 If model lacks PV dynamics, emulate a day profile with a smooth multiplier
+#         day_mult = _gaussian_pv_scaler(hour)                                # scalar 0..1 shaping factor centred around midday
+
+# # 5.1.3 Execute one snapshot load flow for this hour
+#         ldf.Execute()                                                       # perform the network solution for current state  # :contentReference[oaicite:17]{index=17}
+
+# # 5.1.4 Buses: capture voltage in per-unit
+#         for name, term in buses.items():                                    # loop over every calc-relevant bus/terminal
+#             try:
+#                 u = term.GetAttribute("m:u")                                # read measured voltage (pu) attribute
+#             except Exception:
+#                 u = None                                                    # if attribute missing/unavailable, record nothing
+#             if u is not None:
+#                 bus_u[name].append((t, float(u)))                           # append (time, pu) to the bus’s series
+
+# # 5.1.5 PV: capture active power (kW or MW depending on template), apply day profile for snapshot mode
+#         for key, pv in pv_objs.items():                                     # iterate each PV object we resolved
+#             p = pv.GetAttribute("m:Psum")                                   # try measured total active power first
+#             if p is None:
+#                 p = pv.GetAttribute("pgini")                                # fallback to initial setpoint if measured value absent
+#             val = float(p) if p is not None else 0.0                        # ensure a numeric value
+#             pv_p_kw[key].append((t, val * day_mult))                        # apply daylight multiplier and store (t, value)
+
+# # 5.1.6 Loads: sum all ElmLod active powers
+#         tot = 0.0                                                           # accumulator for total load
+#         for ld in net["loads"]:                                             # iterate each load element
+#             p = ld.GetAttribute("m:Psum")                                   # measured active power of the load
+#             if p is None:
+#                 continue                                                    # skip if attribute not available
+#             tot += float(p)                                                 # add to the running total
+#         load_kw.append((t, tot))                                            # store (t, total_kW_or_MW_depends)
+
+# # 5.1.7 Assets: capture line/trafo loading percentages
+#         for ln in net["lines"]:                                             # for each line
+#             v = ln.GetAttribute("loading")                                  # loading percentage attribute
+#             if v is not None:
+#                 line_load[ln.loc_name].append((t, float(v)))                # store (t, %)
+#         for tr in net["trafos"]:                                            # for each transformer
+#             v = tr.GetAttribute("loading")                                  # loading percentage attribute
+#             if v is not None:
+#                 trafo_load[tr.loc_name].append((t, float(v)))               # store (t, %)
+
+# # 5.1.8 Normalise PV/load units to kW (heuristic converter handles MW→kW)
+#     for k, s in pv_p_kw.items():                                            # per PV series
+#         pv_p_kw[k] = maybe_MW_to_kW(s)                                      # convert if series appears to be in MW
+#     load_kw = maybe_MW_to_kW(load_kw)                                       # convert total load series if needed
+
+# # 5.1.9 Assemble the structured report payload
+#     report = {
+#         "limits": {},                                                       # bus voltage min/max + OK flag per GUI suburb bus
+#         "pv": {},                                                           # per-PV energy and peak information + series
+#         "lines": {},                                                        # per-line maximum loading %
+#         "trafos": {},                                                       # per-trafo maximum loading %
+#         "load": {},                                                         # total load series + energy
+#         "meta": {"mode": "snapshot", "dt_s": 3600.0}                        # metadata: mode and timestep used
+#     }
+
+# # 5.1.10 Compute bus min/max/OK flags (per GUI suburb bus)
+#     for key, meta in PV_CONFIG.items():                                     # iterate GUI-configured suburbs
+#         bus = meta["bus"]                                                   # the associated PF bus name
+#         s = bus_u.get(bus, [])                                              # fetch that bus’s voltage series
+#         mm = series_minmax(s)                                               # derive min/max and times
+#         if mm:
+#             mm["ok"] = (mm["u_min"] >= V_OK_MIN and 
+#             mm["u_max"] <= V_OK_MAX)                                        # within limits → OK True/False
+#             report["limits"][bus] = mm                                      # store under the bus name
+
+# # 5.1.11 PV energy and peaks per pv_key
+#     for key, s in pv_p_kw.items():                                          # per PV series
+#         e = energy_kwh(s)                                                   # integrate to kWh over the day
+#         pmax = max((v for _, v in s), default=0.0)                          # maximum instantaneous power across the series
+#         report["pv"][key] = {"series_kW": s, "e_kWh": e, "p_kw_max": pmax}  # package PV metrics
+
+# # 5.1.12 Line/trafo worst-case loading percentages
+#     for name, s in line_load.items():                                       # per line series
+#         if s:
+#             report["lines"][name] = {"loading_max_pct": 
+#                                      max(v for _, v in s)}                  # store the maximum observed %
+#     for name, s in trafo_load.items():                                      # per transformer series
+#         if s:
+#             report["trafos"][name] = {"loading_max_pct": 
+#                                       max(v for _, v in s)}                 # store the maximum observed %
+
+# # 5.1.13 Total load series & daily energy
+#     report["load"]["total_series_kW"] = load_kw                             # the unified total-load time-series (kW)
+#     report["load"]["total_e_kWh"] = energy_kwh(load_kw)                     # integrated daily energy (kWh)
+
+#     return report                                                           # hand back the complete snapshot-mode results bundle
 # =====================================================================================================================================================
 # =====================================================================================================================================================
 # 5.0 ---------- Snapshot sweep (Fallback if QDS is playing silly buggers) 
@@ -341,7 +625,7 @@ def run_snapshot_24h(app):
     pv_objs, _ = get_pv_objects(app)                                        # pv_key → PV object (ignore missing list here)
     net     = discover_network_elements(app)                                # discover lines/transformers/loads for loading & totals
 
-# 5.1.1 Storage for time-series that builds as sweep hours
+    # 5.1.1 Storage for time-series that builds as sweep hours
     bus_u      = {b: [] for b in buses}                                     # bus name → list of (t, pu) voltage tuples
     pv_p_kw    = {k: [] for k in pv_objs}                                   # pv_key → list of (t, kW) output tuples
     load_kw    = []                                                         # total load time-series (t, kW) across all loads
@@ -352,54 +636,54 @@ def run_snapshot_24h(app):
     for idx, t in enumerate(times):                                         # iterate each hourly timestamp
         hour = t // 3600                                                    # integer hour index (0..23)
 
-# 5.1.2 If model lacks PV dynamics, emulate a day profile with a smooth multiplier
+        # 5.1.2 If model lacks PV dynamics, emulate a day profile with a smooth multiplier
         day_mult = _gaussian_pv_scaler(hour)                                # scalar 0..1 shaping factor centred around midday
 
-# 5.1.3 Execute one snapshot load flow for this hour
-        ldf.Execute()                                                       # perform the network solution for current state  # :contentReference[oaicite:17]{index=17}
+        # 5.1.3 Execute one snapshot load flow for this hour
+        ldf.Execute()                                                       # perform the network solution for current state
 
-# 5.1.4 Buses: capture voltage in per-unit
+        # 5.1.4 Buses: capture voltage in per-unit
         for name, term in buses.items():                                    # loop over every calc-relevant bus/terminal
-            try:
-                u = term.GetAttribute("m:u")                                # read measured voltage (pu) attribute
-            except Exception:
-                u = None                                                    # if attribute missing/unavailable, record nothing
+            # CHANGED: tolerant voltage read (tries measured + calculated variants)
+            u = _get_attr(term, "m:u", "m:u1", "c:u")                       # NEW: robust voltage (pu) getter
             if u is not None:
                 bus_u[name].append((t, float(u)))                           # append (time, pu) to the bus’s series
 
-# 5.1.5 PV: capture active power (kW or MW depending on template), apply day profile for snapshot mode
+        # 5.1.5 PV: capture active power (kW or MW depending on template), apply day profile for snapshot mode
         for key, pv in pv_objs.items():                                     # iterate each PV object we resolved
-            p = pv.GetAttribute("m:Psum")                                   # try measured total active power first
-            if p is None:
-                p = pv.GetAttribute("pgini")                                # fallback to initial setpoint if measured value absent
+            # CHANGED: tolerant PV power read (measured → setpoint → calculated)
+            p = _get_attr(pv, "m:Psum", "pgini", "c:Psum")                  # NEW: robust PV active power getter
             val = float(p) if p is not None else 0.0                        # ensure a numeric value
             pv_p_kw[key].append((t, val * day_mult))                        # apply daylight multiplier and store (t, value)
 
-# 5.1.6 Loads: sum all ElmLod active powers
+        # 5.1.6 Loads: sum all ElmLod active powers
         tot = 0.0                                                           # accumulator for total load
         for ld in net["loads"]:                                             # iterate each load element
-            p = ld.GetAttribute("m:Psum")                                   # measured active power of the load
+            # CHANGED: tolerant load power read (measured/calculated variants)
+            p = _get_attr(ld, "m:Psum", "m:P", "c:Psum")                    # NEW: robust load active power getter
             if p is None:
                 continue                                                    # skip if attribute not available
             tot += float(p)                                                 # add to the running total
         load_kw.append((t, tot))                                            # store (t, total_kW_or_MW_depends)
 
-# 5.1.7 Assets: capture line/trafo loading percentages
+        # 5.1.7 Assets: capture line/trafo loading percentages
         for ln in net["lines"]:                                             # for each line
-            v = ln.GetAttribute("loading")                                  # loading percentage attribute
+            # CHANGED: tolerant loading read (calculated → measured → bare)
+            v = _get_attr(ln, "c:loading", "m:loading", "loading")          # NEW: robust line loading (%)
             if v is not None:
                 line_load[ln.loc_name].append((t, float(v)))                # store (t, %)
         for tr in net["trafos"]:                                            # for each transformer
-            v = tr.GetAttribute("loading")                                  # loading percentage attribute
+            # CHANGED: tolerant loading read (calculated → measured → bare)
+            v = _get_attr(tr, "c:loading", "m:loading", "loading")          # NEW: robust transformer loading (%)
             if v is not None:
                 trafo_load[tr.loc_name].append((t, float(v)))               # store (t, %)
 
-# 5.1.8 Normalise PV/load units to kW (heuristic converter handles MW→kW)
+    # 5.1.8 Normalise PV/load units to kW (heuristic converter handles MW→kW)
     for k, s in pv_p_kw.items():                                            # per PV series
         pv_p_kw[k] = maybe_MW_to_kW(s)                                      # convert if series appears to be in MW
     load_kw = maybe_MW_to_kW(load_kw)                                       # convert total load series if needed
 
-# 5.1.9 Assemble the structured report payload
+    # 5.1.9 Assemble the structured report payload
     report = {
         "limits": {},                                                       # bus voltage min/max + OK flag per GUI suburb bus
         "pv": {},                                                           # per-PV energy and peak information + series
@@ -410,22 +694,28 @@ def run_snapshot_24h(app):
     }
 
 # 5.1.10 Compute bus min/max/OK flags (per GUI suburb bus)
+    # NOTE: use the resolver to map configured bus names to actual PF terminal names
     for key, meta in PV_CONFIG.items():                                     # iterate GUI-configured suburbs
-        bus = meta["bus"]                                                   # the associated PF bus name
-        s = bus_u.get(bus, [])                                              # fetch that bus’s voltage series
-        mm = series_minmax(s)                                               # derive min/max and times
+        wanted = meta["bus"]                                                # the configured PF bus name
+        real   = _resolve_bus_name(wanted, buses)                           # map to an actual terminal name if needed
+        if not real:
+            continue                                                        # nothing to record if we can't find a match
+
+        s = bus_u.get(real, [])                                             # fetch that terminal’s voltage series
+        mm = series_minmax(s)                                               # derive min/max and their times
         if mm:
             mm["ok"] = (mm["u_min"] >= V_OK_MIN and 
-            mm["u_max"] <= V_OK_MAX)                                        # within limits → OK True/False
-            report["limits"][bus] = mm                                      # store under the bus name
+                        mm["u_max"] <= V_OK_MAX)                            # within limits → OK True/False
+            report["limits"][real] = mm                                     # store under the RESOLVED terminal name
 
-# 5.1.11 PV energy and peaks per pv_key
+
+    # 5.1.11 PV energy and peaks per pv_key
     for key, s in pv_p_kw.items():                                          # per PV series
         e = energy_kwh(s)                                                   # integrate to kWh over the day
         pmax = max((v for _, v in s), default=0.0)                          # maximum instantaneous power across the series
         report["pv"][key] = {"series_kW": s, "e_kWh": e, "p_kw_max": pmax}  # package PV metrics
 
-# 5.1.12 Line/trafo worst-case loading percentages
+    # 5.1.12 Line/trafo worst-case loading percentages
     for name, s in line_load.items():                                       # per line series
         if s:
             report["lines"][name] = {"loading_max_pct": 
@@ -435,46 +725,186 @@ def run_snapshot_24h(app):
             report["trafos"][name] = {"loading_max_pct": 
                                       max(v for _, v in s)}                 # store the maximum observed %
 
-# 5.1.13 Total load series & daily energy
+    # 5.1.13 Total load series & daily energy
     report["load"]["total_series_kW"] = load_kw                             # the unified total-load time-series (kW)
     report["load"]["total_e_kWh"] = energy_kwh(load_kw)                     # integrated daily energy (kWh)
 
-    return report                                                           # hand back the complete snapshot-mode results bundle
+    return report
 
 
+
+# # =====================================================================================================================================================
+# # =====================================================================================================================================================
+# # 6.0 ---------- QDS path (if available) ----------  # attempt a quasi-dynamic simulation; fall back to snapshot post-processing
+# # =====================================================================================================================================================
+# # =====================================================================================================================================================
+
+# # 6.1 run_qds_24h: Configure and run a 24-hour QDS sweep; if unsupported, raise so caller can use snapshot mode
+# def run_qds_24h(app):
+#     """
+#     Attempt a quasi-dynamic 24h sweep. If no suitable object is present or ElmRes
+#     writes no rows, raise to allow fallback to snapshot.
+#     """
+# # 6.1.1 Obtain a QDS command object (project dependent) or fail fast
+#     qds = _configure_qds(app)                                               # helper should locate/prepare ComInc/ComSim (or equivalent) for QDS
+#     if not qds:
+#         raise RuntimeError("No QDS command object found (ComInc/ComSim).")  # let the caller decide to fall back
+
+# # 6.1.2 Set the time grid on the QDS object where supported
+#     for attr, val in (("tstart", QDS_TSTART_S), ("tstop", QDS_TSTOP_S), ("dtgrid", QDS_DT_S)):
+#         try:
+#             setattr(qds, attr, val)                                         # not all QDS variants expose these; ignore if they don’t
+#         except Exception:
+#             pass                                                            # keep going even if some attributes aren’t available
+
+# # 6.1.3 Execute the QDS sweep (object type depends on your PF setup)
+#     qds.Execute()                                                           # Run the sweep (object class depends on your setup)  # :contentReference[oaicite:18]{index=18}
+
+# # 6.1.4 Post-processing: reuse robust snapshot readers to assemble the same report structure
+#     # After QDS, read results directly from element attributes at final time,
+#     # and also reconstruct time series via repeated Read of ElmRes if configured.
+#     # Because QDS wiring varies widely, we’ll use the robust snapshot readers
+#     # executed *after* QDS to collect the same signals across the 24h times.
+#     return run_snapshot_24h(app)                                            # leverage existing logic to build the 'report' dict
 # =====================================================================================================================================================
 # =====================================================================================================================================================
-# 6.0 ---------- QDS path (if available) ----------  # attempt a quasi-dynamic simulation; fall back to snapshot post-processing
+# 6.0 ---------- QDS path (preferred & required) ----------  # run quasi-dynamic and read time-series from ElmRes
 # =====================================================================================================================================================
 # =====================================================================================================================================================
 
-# 6.1 run_qds_24h: Configure and run a 24-hour QDS sweep; if unsupported, raise so caller can use snapshot mode
 def run_qds_24h(app):
     """
-    Attempt a quasi-dynamic 24h sweep. If no suitable object is present or ElmRes
-    writes no rows, raise to allow fallback to snapshot.
+    Run a 24-hour quasi-dynamic simulation and read results from ElmRes.
+    Builds the same 'report' dict shape as snapshot mode:
+      - report["limits"][<bus_name>] = {u_min, t_min_s, u_max, t_max_s, ok}
+      - report["pv"][<pv_key>]       = {series_kW: [(t, kW)...], e_kWh, p_kw_max}
+      - report["lines"][name]        = {loading_max_pct}
+      - report["trafos"][name]       = {loading_max_pct}
+      - report["load"]["total_series_kW"], report["load"]["total_e_kWh"]
+    Raises RuntimeError if ElmRes is not found or has no usable columns.
     """
-# 6.1.1 Obtain a QDS command object (project dependent) or fail fast
-    qds = _configure_qds(app)                                               # helper should locate/prepare ComInc/ComSim (or equivalent) for QDS
+
+    # 6.1 Locate and lightly configure a QDS command
+    qds = _configure_qds(app)                                               # ComInc/ComSim (project-dependent)
     if not qds:
-        raise RuntimeError("No QDS command object found (ComInc/ComSim).")  # let the caller decide to fall back
+        raise RuntimeError("No QDS command object found (ComInc/ComSim) in the active Study Case.")
 
-# 6.1.2 Set the time grid on the QDS object where supported
-    for attr, val in (("tstart", QDS_TSTART_S), ("tstop", QDS_TSTOP_S), ("dtgrid", QDS_DT_S)):
-        try:
-            setattr(qds, attr, val)                                         # not all QDS variants expose these; ignore if they don’t
-        except Exception:
-            pass                                                            # keep going even if some attributes aren’t available
+    # 6.2 Execute the QDS sweep
+    qds.Execute()                                                           # run the time sweep (00:00..24:00 in your settings)
 
-# 6.1.3 Execute the QDS sweep (object type depends on your PF setup)
-    qds.Execute()                                                           # Run the sweep (object class depends on your setup)  # :contentReference[oaicite:18]{index=18}
+    # 6.3 Fetch ElmRes (results table) — required for QDS time-series extraction
+    res = _get_elmres(app)
+    if not res:
+        raise RuntimeError("No ElmRes results table found after QDS. Ensure your Study Case writes results to ElmRes.")
 
-# 6.1.4 Post-processing: reuse robust snapshot readers to assemble the same report structure
-    # After QDS, read results directly from element attributes at final time,
-    # and also reconstruct time series via repeated Read of ElmRes if configured.
-    # Because QDS wiring varies widely, we’ll use the robust snapshot readers
-    # executed *after* QDS to collect the same signals across the 24h times.
-    return run_snapshot_24h(app)                                            # leverage existing logic to build the 'report' dict
+    # 6.4 Discover network objects for naming
+    buses_map   = get_bus_objects(app)                                      # {loc_name: ElmTerm}
+    pv_objs, _  = get_pv_objects(app)                                       # {pv_key: ElmPvsys/ElmGenstat}
+    net         = discover_network_elements(app)                            # {"lines": [...], "trafos": [...], "loads": [...]}
+    # 6.4a Ensure QDS Variables set (create/update + attach to qds.p_resvar)
+    _ensure_qds_varset(app, qds, buses_map, net)
+
+    # 6.5 Read series from ElmRes, assembling containers like snapshot mode
+    bus_u      = {b: [] for b in buses_map}                                 # bus name -> [(t, pu)...]
+    pv_p_kw    = {k: [] for k in pv_objs}                                   # pv_key -> [(t, kW_or_MW)...]
+    line_load  = {ln.loc_name: [] for ln in net["lines"]}                   # line name -> [(t, %) ...]
+    trafo_load = {tr.loc_name: [] for tr in net["trafos"]}                  # trafo name -> [(t, %) ...]
+    load_total = []                                                         # [(t, kW_or_MW)...], summed across loads
+
+    # 6.5.1 Voltages per bus — try common variants (:u, :u1, :ul)
+    for bname in buses_map:
+        series = _elmres_series(res, [f"{bname}:u", f"{bname}:u1", f"{bname}:ul", f"{bname}:c:u"])
+        if series:
+            bus_u[bname] = series
+
+    # 6.5.2 PV power per pv_key — use the PV object's display name in ElmRes (loc_name)
+    for pv_key, pv in pv_objs.items():
+        pv_name = getattr(pv, "loc_name", pv_key)
+        s = _elmres_series(res, [f"{pv_name}:Psum", f"{pv_name}:P", f"{pv_name}:c:Psum"])
+        if s:
+            pv_p_kw[pv_key] = s
+
+    # 6.5.3 Line/transformer loading (%)
+    for ln in net["lines"]:
+        ln_name = ln.loc_name
+        s = _elmres_series(res, [f"{ln_name}:loading", f"{ln_name}:c:loading"])
+        if s:
+            line_load[ln_name] = s
+
+    for tr in net["trafos"]:
+        tr_name = tr.loc_name
+        s = _elmres_series(res, [f"{tr_name}:loading", f"{tr_name}:c:loading"])
+        if s:
+            trafo_load[tr_name] = s
+
+    # 6.5.4 Total load series — sum all loads' P across time rows
+    # We assume all load series share the same time vector (ElmRes row 0..N-1).
+    # First, gather per-load series; then sum by row index.
+    load_series_per_ld = []
+    for ld in net["loads"]:
+        ld_name = ld.loc_name
+        s = _elmres_series(res, [f"{ld_name}:Psum", f"{ld_name}:P", f"{ld_name}:c:Psum"])
+        if s:
+            load_series_per_ld.append(s)
+
+    if load_series_per_ld:
+        # Use the time axis of the first load series; sum values at each index.
+        base = load_series_per_ld[0]
+        for i, (t, _) in enumerate(base):
+            tot = 0.0
+            for s in load_series_per_ld:
+                if i < len(s) and abs(s[i][0] - t) < 1e-6:                  # align by index/time
+                    tot += s[i][1]
+            load_total.append((t, tot))
+
+    # 6.6 Normalise PV/load units to kW (handles series that might be in MW)
+    for k, s in list(pv_p_kw.items()):
+        pv_p_kw[k] = maybe_MW_to_kW(s)
+    load_total = maybe_MW_to_kW(load_total)
+
+    # 6.7 Assemble the structured report payload
+    report = {
+        "limits": {},                                                       # bus voltage min/max + OK flag
+        "pv": {},                                                           # per-PV energy/peaks + series
+        "lines": {},                                                        # per-line max loading %
+        "trafos": {},                                                       # per-trafo max loading %
+        "load": {},                                                         # total load series + energy
+        "meta": {"mode": "qds", "dt_s": QDS_DT_S}                           # record that this came from QDS
+    }
+
+    # 6.8 Compute bus min/max/OK using your resolver from Step 3
+    for key, meta in PV_CONFIG.items():
+        wanted = meta["bus"]
+        real   = _resolve_bus_name(wanted, buses_map)                       # resolve configured name -> actual terminal
+        if not real:
+            continue
+        s = bus_u.get(real, [])
+        mm = series_minmax(s)
+        if mm:
+            mm["ok"] = (mm["u_min"] >= V_OK_MIN and mm["u_max"] <= V_OK_MAX)
+            report["limits"][real] = mm
+
+    # 6.9 PV energy and peaks per pv_key
+    for key, s in pv_p_kw.items():
+        if not s:
+            continue
+        e = energy_kwh(s)                                                   # kWh across the day
+        pmax = max((v for _, v in s), default=0.0)                          # peak kW
+        report["pv"][key] = {"series_kW": s, "e_kWh": e, "p_kw_max": pmax}
+
+    # 6.10 Line/trafo worst-case loading percentages
+    for name, s in line_load.items():
+        if s:
+            report["lines"][name] = {"loading_max_pct": max(v for _, v in s)}
+    for name, s in trafo_load.items():
+        if s:
+            report["trafos"][name] = {"loading_max_pct": max(v for _, v in s)}
+
+    # 6.11 Total load series & daily energy
+    report["load"]["total_series_kW"] = load_total
+    report["load"]["total_e_kWh"]     = energy_kwh(load_total)
+
+    return report
 
 
 # =====================================================================================================================================================
@@ -484,41 +914,83 @@ def run_qds_24h(app):
 # =====================================================================================================================================================
 
 
+# # 7.1 Apply GUI slider values in PF, run 24 h analysis, write JSON/PDF, return results dict
+# def set_penetrations_and_run(sliders, pdf_path=PDF_DEFAULT):
+#     """
+#     Main entry for GUI:
+#       - set PV penetrations according to sliders {pv_key: percent}
+#       - run 24-hour analysis (QDS first; snapshot fallback)
+#       - return rich result dict (and write a PDF report)
+#     """
+#     app = connect_and_activate()                                            # ensure PowerFactory is running with a project open; get Application handle
+#     _ = get_studycase(app)                                                  # verify a Study Case is active (raises if not); value unused, check only
+#     missing = set_pv_penetrations(app, sliders)                             # push slider percentages into PF objects; returns any pv_keys not found
+
+#     try:                                                                    # attempt preferred simulation path first
+#         if USE_QDS_FIRST:                                                   # if configured to use quasi-dynamic simulation
+#             results = run_qds_24h(app)                                      # run QDS for 24 h and post-process
+#         else:                                                               # otherwise
+#             results = run_snapshot_24h(app)                                 # do robust snapshot sweep instead
+#     except Exception:                                                       # if QDS setup fails or execution errors,
+#         results = run_snapshot_24h(app)                                     # fall back to snapshot mode to keep things resilient
+
+#     results["missing_pv"] = list(missing)                                   # surface any PV objects not found so the GUI can warn the user
+
 # 7.1 Apply GUI slider values in PF, run 24 h analysis, write JSON/PDF, return results dict
 def set_penetrations_and_run(sliders, pdf_path=PDF_DEFAULT):
     """
     Main entry for GUI:
       - set PV penetrations according to sliders {pv_key: percent}
-      - run 24-hour analysis (QDS first; snapshot fallback)
+      - run 24-hour quasi-dynamic simulation (QDS only)
       - return rich result dict (and write a PDF report)
     """
     app = connect_and_activate()                                            # ensure PowerFactory is running with a project open; get Application handle
     _ = get_studycase(app)                                                  # verify a Study Case is active (raises if not); value unused, check only
     missing = set_pv_penetrations(app, sliders)                             # push slider percentages into PF objects; returns any pv_keys not found
 
-    try:                                                                    # attempt preferred simulation path first
-        if USE_QDS_FIRST:                                                   # if configured to use quasi-dynamic simulation
-            results = run_qds_24h(app)                                      # run QDS for 24 h and post-process
-        else:                                                               # otherwise
-            results = run_snapshot_24h(app)                                 # do robust snapshot sweep instead
-    except Exception:                                                       # if QDS setup fails or execution errors,
-        results = run_snapshot_24h(app)                                     # fall back to snapshot mode to keep things resilient
+    # --- Step 4 change: force QDS only, no snapshot fallback ---
+    results = run_qds_24h(app)                                              # run quasi-dynamic simulation for 24 h
 
     results["missing_pv"] = list(missing)                                   # surface any PV objects not found so the GUI can warn the user
+    return results
 
-# 7.1.1 Build legacy bus-keyed entries: { "<bus>": {"u_min":..., "u_max":..., "ok":...}, ... }
+
+# # 7.1.1 Build legacy bus-keyed entries: { "<bus>": {"u_min":..., "u_max":..., "ok":...}, ... }
+#     legacy = {}                                                             # temporary dict for legacy keys
+#     for key, meta in PV_CONFIG.items():                                     # iterate configured GUI suburbs
+#         bus = meta["bus"]                                                   # associated PF bus name
+#         lim = results.get("limits", {}).get(bus)                            # look up computed limits for that bus
+#         if lim:                                                             # if we have limits, copy out the essentials
+#             legacy[bus] = {
+#                 "u_min": lim.get("u_min"),
+#                 "u_max": lim.get("u_max"),
+#                 "ok":    lim.get("ok", True),
+#             }
+
+# # 7.1.2 Merge legacy keys into top-level results so old GUI code can still iterate results.items()
+#     results.update(legacy)                                                  # adds/overwrites bus-named keys at the root of the dict
+    # 7.1.1 Build legacy bus-keyed entries with RESOLVED terminal names
+    try:
+        # Build a fresh bus map here so the resolver has the same view
+        buses_map = get_bus_objects(app)                                    # {loc_name: ElmTerm}
+    except Exception:
+        buses_map = {}
+
     legacy = {}                                                             # temporary dict for legacy keys
     for key, meta in PV_CONFIG.items():                                     # iterate configured GUI suburbs
-        bus = meta["bus"]                                                   # associated PF bus name
-        lim = results.get("limits", {}).get(bus)                            # look up computed limits for that bus
-        if lim:                                                             # if we have limits, copy out the essentials
-            legacy[bus] = {
+        wanted = meta["bus"]                                                # configured bus (may be shorthand)
+        real   = _resolve_bus_name(wanted, buses_map)                       # resolve to actual terminal name
+        if not real:
+            continue
+        lim = results.get("limits", {}).get(real)                           # look up computed limits using RESOLVED name
+        if lim:
+            legacy[real] = {                                                # use RESOLVED bus name for legacy top-level key
                 "u_min": lim.get("u_min"),
                 "u_max": lim.get("u_max"),
                 "ok":    lim.get("ok", True),
             }
 
-# 7.1.2 Merge legacy keys into top-level results so old GUI code can still iterate results.items()
+    # 7.1.2 Merge legacy keys into top-level results so the GUI can still iterate results.items()
     results.update(legacy)                                                  # adds/overwrites bus-named keys at the root of the dict
 
 # 7.1.3 Always include a JSON copy beside the PDF for programmatic reuse

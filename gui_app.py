@@ -867,35 +867,89 @@ class App(tk.Tk):
 # =====================================================================================================================================================
 
 
-# 7.1 _update_cache_from_results: Copy backend values (min/max/ok) into the GUI’s per-suburb cache
-    def _update_cache_from_results(self, results):
-        """
-        Make the GUI cache match the backend results.
-        - New backend: bus limits live under results["limits"].
-        - Legacy fallback: if no "limits", assume top-level bus keys.
-        """
-        import time                                                     # local import for simple timestamping
-        now = time.time()                                               # epoch seconds; used to mark when a suburb’s cache was last updated
+# # 7.1 _update_cache_from_results: Copy backend values (min/max/ok) into the GUI’s per-suburb cache
+#     def _update_cache_from_results(self, results):
+#         """
+#         Make the GUI cache match the backend results.
+#         - New backend: bus limits live under results["limits"].
+#         - Legacy fallback: if no "limits", assume top-level bus keys.
+#         """
+#         import time                                                     # local import for simple timestamping
+#         now = time.time()                                               # epoch seconds; used to mark when a suburb’s cache was last updated
 
-# 7.1.1 Map bus -> pv_key once (PV_CONFIG comes from otaki_sim)
-        bus_to_pv = {v["bus"]: k for k, v in sim.PV_CONFIG.items()}     # reverse map: LV bus name → suburb key (pv_key)
+# # 7.1.1 Map bus -> pv_key once (PV_CONFIG comes from otaki_sim)
+#         bus_to_pv = {v["bus"]: k for k, v in sim.PV_CONFIG.items()}     # reverse map: LV bus name → suburb key (pv_key)
 
-# 7.1.2 Prefer the new-place limits, else fall back to old top-level shape
-        limits_dict = (results or {}).get("limits")                     # new backend: results contains a "limits" dict keyed by bus
-        if not isinstance(limits_dict, dict):                           # if missing or wrong type, assume legacy shape (top-level bus keys)
-            limits_dict = results or {}                                 # tolerate None by treating it as {}
+# # 7.1.2 Prefer the new-place limits, else fall back to old top-level shape
+#         limits_dict = (results or {}).get("limits")                     # new backend: results contains a "limits" dict keyed by bus
+#         if not isinstance(limits_dict, dict):                           # if missing or wrong type, assume legacy shape (top-level bus keys)
+#             limits_dict = results or {}                                 # tolerate None by treating it as {}
 
-        for bus, info in limits_dict.items():                           # iterate each bus → info block (expects dicts with u_min/u_max/ok)
-            if not isinstance(info, dict):                              # skip anything that isn’t a dict (defensive)
-                continue                                                # ignore non-dict entries
-            pv_key = bus_to_pv.get(bus)                                 # find which suburb this bus corresponds to
-            if not pv_key:                                              # if the bus isn’t in our PV_CONFIG mapping, ignore it
-                continue                                                # unknown bus → skip
-            st = self.suburb_state[pv_key]                              # pull the cached state record for this suburb
-            st["u_min"] = info.get("u_min")                             # write minimum per-unit voltage if present
-            st["u_max"] = info.get("u_max")                             # write maximum per-unit voltage if present
-            st["ok"]    = info.get("ok", True)                          # default to True (OK) if backend didn’t include a flag
-            st["last_updated"] = now                                    # remember when we last updated this suburb’s results
+#         for bus, info in limits_dict.items():                           # iterate each bus → info block (expects dicts with u_min/u_max/ok)
+#             if not isinstance(info, dict):                              # skip anything that isn’t a dict (defensive)
+#                 continue                                                # ignore non-dict entries
+#             pv_key = bus_to_pv.get(bus)                                 # find which suburb this bus corresponds to
+#             if not pv_key:                                              # if the bus isn’t in our PV_CONFIG mapping, ignore it
+#                 continue                                                # unknown bus → skip
+#             st = self.suburb_state[pv_key]                              # pull the cached state record for this suburb
+#             st["u_min"] = info.get("u_min")                             # write minimum per-unit voltage if present
+#             st["u_max"] = info.get("u_max")                             # write maximum per-unit voltage if present
+#             st["ok"]    = info.get("ok", True)                          # default to True (OK) if backend didn’t include a flag
+#             st["last_updated"] = now                                    # remember when we last updated this suburb’s results
+
+# # 7.1 _update_cache_from_results: Copy backend values (min/max/ok) into the GUI’s per-suburb cache
+def _update_cache_from_results(self, results):
+    """
+    Make the GUI cache match the backend results.
+    Accept limits keyed by *resolved* PF terminal names (e.g., OTKa_0.415)
+    as well as simple configured names (e.g., OTKa).
+    """
+    import time
+    now = time.time()
+
+    # Build a flexible matcher: exact configured name -> pv_key, and also allow prefix matches
+    # Example: a result bus "OTKa_0.415" should map to configured "OTKa".
+    cfg_bus_to_key = {v["bus"]: k for k, v in sim.PV_CONFIG.items()}  # exact map
+    cfg_items = list(cfg_bus_to_key.items())                           # list of (cfg_bus, pv_key) for prefix matching
+
+    # Prefer the new-place limits, else fall back to old top-level shape
+    limits_dict = (results or {}).get("limits")
+    if not isinstance(limits_dict, dict):
+        limits_dict = results or {}
+
+    # Helper to locate pv_key from a result bus name (resolved PF terminal)
+    def match_pv_key(result_bus: str):
+        # 1) exact match first
+        pv_key = cfg_bus_to_key.get(result_bus)
+        if pv_key:
+            return pv_key
+        # 2) prefix rule: if result_bus starts with a configured bus token, accept it
+        #    e.g. "OTKa_0.415" startswith "OTKa" → map to that suburb
+        for cfg_bus, key in cfg_items:
+            if result_bus.startswith(cfg_bus):
+                return key
+        # 3) last resort: contains (more lenient)
+        for cfg_bus, key in cfg_items:
+            if cfg_bus in result_bus:
+                return key
+        return None
+
+    # Consume limits (min/max/ok) and write into suburb_state
+    for bus, info in limits_dict.items():
+        if not isinstance(info, dict):
+            continue
+        pv_key = match_pv_key(bus)         # map resolved bus name back to GUI suburb key
+        if not pv_key:
+            continue
+
+        st = self.suburb_state.get(pv_key)
+        if not st:
+            continue
+        st["u_min"] = info.get("u_min")
+        st["u_max"] = info.get("u_max")
+        st["ok"]    = info.get("ok", True)
+        st["last_updated"] = now
+
 
 # 7.2 _update_result_text: (reserved) Format-specific text updates per suburb (currently unused; kept for future)
     def _update_result_text(self, pv_key):
