@@ -4,7 +4,7 @@
 
 # =====================================================================================================================================================
 # =====================================================================================================================================================
-# 1.0 Enviroment Set UP
+# 1.0 Set UP
 # =====================================================================================================================================================
 # =====================================================================================================================================================
 
@@ -22,10 +22,10 @@ except Exception:                                           # If Pillow isn't in
 
 import otaki_sim as sim                                     # Backend code for PowerFactory logic and return results
 from copy import deepcopy                                   # Keep independent copies of lists etc for the GUI storage
-import time                                                 # Time warp baby
+import time                                                 # Timeswarp baby
 
 
-# 1.1 Plotting and Graphing setup --------------------------------------------------------------------------------------------------------------------
+# 1.1 Plotting and Graphing setup
 try:                                                        # Try to enable plotting inside the Tkinter window if Matplotlib is avaiable
     from matplotlib.figure import Figure                    # The plotting frame
     from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg  # Puts a frame into the Tk widget
@@ -40,14 +40,13 @@ except Exception:                                           # If Matplotlib impo
 # =====================================================================================================================================================
 # =====================================================================================================================================================
 
-#2.1 UI Theme constents
 APP_TITLE = "Ōtaki Grid – Solar Penetration GUI"              # Show the title in the title bar
 DEFAULT_BG = "#D9D9D9"                                      # Main background colour for the widgets (light grey)
 OK_COLOUR = "#1E7D32"                                       # Colour used when voltages are within limits (green)
 WARN_COLOUR = "#C62828"                                     # Colour used when voltages are out of limits (red)
 ACCENT_GREEN = "#2ECC71"                                    # Accent colour for highlights, pressed buttons etc
 
-# 2.2 Suburb Full Name list 
+# 2.1 Suburb Full Name list 
 SUBURB_FULL = {                                               
     "OTBa_PV": "Ōtaki Beach A",                               # Label shown next to its slider
     "OTBb_PV": "Ōtaki Beach B",
@@ -67,27 +66,20 @@ SUBURB_FULL = {
     "WTVc_PV": "Waitohu Valley C",
 }
 
-# 2.3 Suburb Variable Defaults 
+# 2.2 Suburb Variable Defauls 
 SUBURB_DEFAULTS = {
-    "pv_pct": 0.0,                                          # Slider % PV penetration
-    "pv_kw": 0.0,                                           # Installed PV (kW) computed from slider
-    "u_min": None,                                          # Min pu voltage over the day
-    "u_max": None,                                          # Max pu voltage over the day
-    "ok": None,                                             # True if voltages within limits
-    "load_curve": None,                                     # kW time series (from backend)
-    "pv_profile": None,                                     # kW time series (from backend)
-    "last_updated": None,                                   # Timestamp of last update
-    "bus": None,                                            # Associated PF bus name
-    "tx_loading": None,                                     # Transformer loading (%) at summary point
-    "line_loading": None,                                   # Line loading (%) at summary point
-    "tx_overload": None,                                    # True if any Tx overload detected
-    "line_overload": None,                                  # True if any line overload detected
-    "tx_loading_curve": None,                               # Transformer loading % time series
-    "line_loading_curve": None,                             # Line loading % time series
+    "pv_pct": 0.0,                                          # Slider value as a percentage of rooftop PV penetration 
+    "pv_kw": 0.0,                                           # Computed nstalled PV (kW) for that suburb
+    "u_min": None,                                          # Minimum pu bus voltage over the day
+    "u_max": None,                                          # Maximum pu bus voltage over the day
+    "ok": None,                                             # Limit flag (True=in limits, False=out of limits) for quick colouring
+    "load_curve": None,                                     # Time series of load (kW) for plotting if provided by backend
+    "pv_profile": None,                                     # Time series of PV output (kW) for plotting if provided by backend
+    "last_updated": None,                                   # Timestamp of the last time this suburb’s results were written to the storage
+    "bus": None,                                            # The associated PowerFactory bus name for this suburb
 }
 
-
-# 2.4 Result labels used for the results box ---------------------------------------------------------------------------
+# 2.3 Result labels used for the results box ---------------------------------------------------------------------------
 SHOW_METRIC_SELECTOR = False                                # Drop down menu for graph, set true to enable, not sure if needed
 
 METRIC_OPTIONS = [
@@ -99,18 +91,16 @@ METRIC_OPTIONS = [
 
 # =====================================================================================================================================================
 # =====================================================================================================================================================
-# 3.0 ---------- UI setup ----------
+# 4.0 ---------- UI setup ----------
 # =====================================================================================================================================================
 # =====================================================================================================================================================
 
 
 class App(tk.Tk):
 
-
 # 3.1  Create the main window, build layout, wire widgets etc
     def __init__(self):
         super().__init__()
-
 
 # 3.1.1 Window basics
         self.title(APP_TITLE)                                       # Window title
@@ -118,23 +108,19 @@ class App(tk.Tk):
         self.geometry("1400x900")                                   # Initial size
         self.minsize(1100, 700)                                     # Minimum usable size
 
-
 # 3.1.2 Style / colour scheme
         self.scheme = "Grey"                                        # Settings color scheme
         self.style = ttk.Style(self)                                # ttk theme thingy
         self.style.theme_use("default")                             # Use the default ttk theme
-
 
 # 3.1.3 Main layout: Horizontal split windows, left for the sliders and run button, right top bottom for the graph and map
         main_pane = tk.PanedWindow(self, orient="horizontal", 
         sashrelief="raised", bg=DEFAULT_BG)                         # Make a horizontal Window 
         main_pane.pack(fill="both", expand=True)                    # pack it so it fills up the whole window and grows/shrinks with resizing
 
-
 # 3.1.4 Left: suburb slider panel (with its own vertical scroll)    # left-hand window with the slider list and RUN button
         left_frame = tk.Frame(main_pane, bg=DEFAULT_BG)             # Builds a smaller frame inside the left side window
         main_pane.add(left_frame, minsize=350)                      # add the frame to the window; make a minimum width so it doesn’t go too small
-
 
 # 3.1.5 RUN row (bottom-left): square cog on the left + wide RUN button on the right
         run_row = tk.Frame(left_frame, bg=DEFAULT_BG)                   # container strip at the bottom
@@ -144,7 +130,6 @@ class App(tk.Tk):
         run_row.grid_columnconfigure(0, weight=0, minsize=54)           # col 0 = cog slot (~square; tweak minsize if needed)
         run_row.grid_columnconfigure(1, weight=1)                       # col 1 = RUN button expands to fill remaining width
         run_row.grid_rowconfigure(0, weight=1)                          # let buttons stretch to the row height
-
 
 # 3.1.5.1 Settings cog (square, same vertical height as RUN)
         self.cog_btn = tk.Button(
@@ -159,7 +144,6 @@ class App(tk.Tk):
         self.cog_btn.grid(row=0, column=0, sticky="nsew", 
                           padx=(6, 6), pady=6)                          # fill its cell; padding mirrors RUN
 
-
 # 3.1.5.2 RUN button (big, expands across the rest of the row)
         self.run_btn = tk.Button(
             run_row, text="RUN", font=("Segoe UI", 13, "bold"),
@@ -171,20 +155,21 @@ class App(tk.Tk):
                           padx=(0, 6), pady=6)                          # stretch horizontally; same vertical padding as cog
         self._settings_win = None  # <-- track the one live settings window (None means closed)
 
-
 # 3.1.6 Scrollable suburbd window area
         scrollbar = ttk.Scrollbar(left_frame, orient="vertical")    # Vertical scrollbar for the left panel
         scrollbar.pack(side="left", fill="y")                       # lock the scrollbar on the far left and stretch it vertically
+
         canvas = tk.Canvas(left_frame, bg=DEFAULT_BG, 
                            highlightthickness=0)                    # canvas will host the scrolling content window
         canvas.pack(side="left", fill="both", expand=True)          # place canvas to the right of the scrollbar, make it resize with the window
+
         canvas.configure(yscrollcommand=scrollbar.set)              # canvas tells the scrollbar where the view is (for the thumb position)
         scrollbar.config(command=canvas.yview)                      # scrollbar controls the vertical view of the canvas when dragged
+
         self.sliders_frame = tk.LabelFrame(canvas, text="Solar " \
         "Penetration (%)", bg=DEFAULT_BG)                           # inner frame that actually holds slider rows
         self.sliders_frame_id = canvas.create_window((0, 0), 
         window=self.sliders_frame, anchor="nw")                     # put the inner frame at (0,0) inside the canvas
-
 
 # 3.1.6.1 Grid widths across 4 columns where each slider row is laid out  
         self.sliders_frame.columnconfigure(0, weight=0, minsize=0)    # column 0: suburb button, fixed width
@@ -192,12 +177,10 @@ class App(tk.Tk):
         self.sliders_frame.columnconfigure(2, weight=0, minsize=0)    # column 2: % entry, fixed width
         self.sliders_frame.columnconfigure(3, weight=0, minsize=190)  # column 3: results labels, 190 px so the text won't be cramped
 
-
 # 3.1.6.2 Update scrollable area whenever content size changes  
         def on_frame_config(event):                                 # callback fired when sliders_frame changes size like adding rows
             canvas.configure(scrollregion=canvas.bbox("all"))       # set the scrollable bit to fit all the content
         self.sliders_frame.bind("<Configure>", on_frame_config)     # wire the size-change event to the callback
-
 
 # 3.1.6.3 Mouse wheel setup                                         # enable mouse wheel scrolling over the canvas
         def _on_mousewheel(event):                                  # wheel data
@@ -212,43 +195,31 @@ class App(tk.Tk):
         self.result_lines    = {}                                   # Top and bottom result line
         self.result_labels   = {}                                   # Alias to the first result line Label (convenience)
         self.suburb_buttons  = {}                                   # Button used to select that suburb plot its bits
+
         row_base = 0                                                # Each suburb uses two rows
 
-
-# 3.1.8 App-wide state + inverter warm-up
-        self.suburb_state = {}
-        self.last_run_signature = None
-        try:
-            sim.get_inverter_counts()
-            self.pv_inverters = {k: v.get("inverters", 0)
-                                for k, v in sim.RESULTS.get("pv_meta", {}).items()}
-            print("[gui] pv_inverters:", self.pv_inverters)
-        except Exception as e:
-            self.pv_inverters = {}
-            print("Warm-up error:", e)
-
-
-
-
+# 3.1.8 Make sure App-wide state storage exists before building the rows 
+        self.suburb_state = {}                                      # Storage holding current state for that suburb
+        self.last_run_signature = None                              # Snapshot of the current slider values
 
 # 3.1.8.1 Build one two-row slider per suburb
-        for pv_key in sim.PV_LIST:                                  # Go through all configured PV objects from the backend
-            self._build_slider_row(self.sliders_frame, row_base, pv_key)                # Build the two-row UI block for the suburb
+        for pv_key in sim.PV_CONFIG.keys():                         # Go through all configured PV objects from the backend
+            self._build_slider_row(self.sliders_frame, 
+                                   row_base, pv_key)                # Build the two-row UI block for the suburb
             row_base += 2                                           # Go forward two rows for the next suburb underneath
-
-         
+#$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$
 # 3.1.9 Load the storage with initial slider values and bus names
-        from copy import deepcopy
-        self.suburb_state = {}
-        for pv_key in sim.PV_LIST:                                   # use backend PV list
-            item = deepcopy(SUBURB_DEFAULTS)
-            item["pv_pct"] = float(self.slider_vars[pv_key].get())   # GUI slider value (%)
-            item["pv_kw"]  = None                                    # let backend compute installed kW
-            item["bus"]    = pv_key.replace("_PV", "_0.415")         # naming convention mapping
-            item["load_curve"] = None                                # lazy-load when user requests plots
-            item["pv_profile"] = None                                # lazy-load when user requests plots
-            self.suburb_state[pv_key] = item
-
+        # NOTE: This duplicates self.suburb_state creation; kept to match current logic.
+        from copy import deepcopy                                   # import here (local) to emphasise we’re copying the defaults per suburb
+        self.suburb_state = {}                                      # reset cache to a fresh dict (overwrites the earlier empty dict)
+        for pv_key, meta in sim.PV_CONFIG.items():                  # iterate suburbs again to initialise their cached state
+            item = deepcopy(SUBURB_DEFAULTS)                        # start from a clean, independent copy of the defaults
+            item["pv_pct"] = float(self.slider_vars[pv_key].get())  # read the current slider (initially 0.0)
+            item["pv_kw"]  = int(round(item["pv_pct"])) * 6         # derive a coarse kW capacity: 6 kW per 1% slider step
+            item["bus"]    = meta["bus"]                            # remember the associated LV bus name from backend config
+            item["load_curve"] = item.get("load_curve", None)       # keep placeholders for plotting if/when data arrives
+            item["pv_profile"] = item.get("pv_profile", None)       # keep placeholders for plotting if/when data arrives
+            self.suburb_state[pv_key] = item                        # write the initialised state back into the cache
 
 # 3.1.9.1 Track last input signature separately (re-set after building)
         self.last_run_signature = None                              # make sure no old signature is left after initial UI build
@@ -262,67 +233,57 @@ class App(tk.Tk):
         orient="vertical", sashrelief="raised", bg=DEFAULT_BG)      # vertical split for graphs/map
         vertical_pane.pack(fill="both", expand=True)                # let the vertical pane fill the whole right side and resize with the window
 
-
 # 3.1.11 Graph frame (top)                                          # labelled frame for the pgraph area
         self.graphs_frame = tk.LabelFrame(vertical_pane, 
         text="Graphs", bg=DEFAULT_BG)                 # top section title 
         self.metric_var = tk.StringVar(value=METRIC_OPTIONS[0])     # hidden default selection; no UI shown
         vertical_pane.add(self.graphs_frame, minsize=100)           # add to the vertical split, don’t let it shrink below ~100 px
 
+# 3.1.11.1 Graph area (Matplotlib embedded in Tk)                   # Put in a Matplotlib canvas if available
+        if MPL_OK:                                                  # only build plotting widgets if Matplotlib was imported successfully
+        
+            from matplotlib.figure import Figure as _Figure         # type: ignore
+            from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg as _FigureCanvasTkAgg  # type: ignore
 
-# 3.1.11.1 Graph area (Matplotlib embedded in Tk)
-        if MPL_OK:                                                   # Only build plotting area if Matplotlib was imported successfully
-            self.fig = Figure(figsize=(5, 3), dpi=100)               # Create a new Matplotlib Figure (canvas) with fixed size and resolution
-            self.ax = self.fig.add_subplot(111)                      # Add one subplot (1 row, 1 col, first cell) → left axis for PV & demand
-            self.ax2 = self.ax.twinx()                               # Create a second y-axis (right side) sharing the same x-axis for % loadings
-            self.ax.set_title("Select a suburb to display curves")   # Set the main title of the graph
-            self.ax.set_xlabel("Hour")                               # Label for the x-axis → simulation time in hours
-            self.ax.set_ylabel("kW")                                 # Label for the left y-axis → PV and demand values in kW
-            self.ax2.set_ylabel("% Loading")                         # Label for the right y-axis → transformer/line loading in %
-            self.ax.grid(True, linestyle="--", linewidth=0.5)        # Enable dashed grid lines for readability
-
-            
-            self.lines = {                                          # Dictionary to store line objects (plot handles) for later updates when a suburb is selected
-                "pv": None,                                         # PV generation curve in kW
-                "load": None,                                       # Load demand curve in kW
-                "tx_pct": None,                                     # Transformer loading curve in %
-                "line_pct": None,                                   # Line loading curve in %
-            }
-
+            self.fig = Figure(figsize=(5, 3), dpi=100)              # Reseve a Figure object (overall plot canvas)
+            self.ax = self.fig.add_subplot(111)                     # Put a single subplot (1x1 grid, first axes)
+            self.ax.set_title("Select a suburb to display curves")  # First up prompt
+            self.ax.set_xlabel("Hour")                              # x-axis label for time in hours
+            self.ax.set_ylabel("kW")                                # y-axis label for power values
+            self.ax.grid(True, linestyle="--", linewidth=0.5)       # dashed grid
             self.canvas_mpl = FigureCanvasTkAgg(self.fig, 
-            master=self.graphs_frame)                               # Embed the Matplotlib figure into the Tkinter frame
+            master=self.graphs_frame)                               # Help Matplotlib talk to the Tk widget
             self.canvas_mpl.get_tk_widget().pack(fill="both", 
-            expand=True, padx=8, pady=(0, 8))                       # Pack canvas so it fills available space
-        else:                                                       # If Matplotlib is not available
-            ttk.Label(self.graphs_frame,                            # Place a text label inside the graphs frame
-                    text="Matplotlib not installed.\nInstall it to see plots.").pack(padx=8, pady=8)  # Message shown instead of graph
-
+            expand=True, padx=8, pady=(0, 8))                       # pack the canvas to fill the frame
+        else:
+# 3.1.11.2 Text if matplotlib not found               
+            self.graph_fallback = tk.Label(                         # Label explaining how to hopfully enable plots 
+                self.graphs_frame, text="Matplotlib not installed.\nInstall it to see plots.",
+                bg=DEFAULT_BG
+            )
+            self.graph_fallback.pack(fill="both", 
+            expand=True, padx=8, pady=(0, 8))                           # centre the message
 
 # 3.1.12 Map frame (middle) — fixed 50/50 split (no adjustable sash)
         self.map_frame = tk.LabelFrame(vertical_pane, text="Maps", bg=DEFAULT_BG)           # labelled container for both maps
         vertical_pane.add(self.map_frame, minsize=100)                                       # add to the vertical split
 
-
 # 3.1.12.1 Fixed split using a simple Frame + grid (two equal columns)
         maps_row = tk.Frame(self.map_frame, bg=DEFAULT_BG)                                   # inner container row
         maps_row.pack(fill="both", expand=True)                                              # occupy all available space
-
 
 # 3.1.12.2 Make two equal-width columns that always share space 50/50
         maps_row.grid_columnconfigure(0, weight=1, uniform="maps")                           # left column stretches equally
         maps_row.grid_columnconfigure(1, weight=1, uniform="maps")                           # right column stretches equally
         maps_row.grid_rowconfigure(0, weight=1)                                              # row stretches vertically too
 
-
 # 3.1.12.3 Left canvas (distribution/normal map)
         self.map_canvas_left = tk.Canvas(maps_row, bg="#BFBFBF", highlightthickness=0)       # left image area
         self.map_canvas_left.grid(row=0, column=0, sticky="nsew", padx=(0, 2), pady=0)       # fill left cell; tiny gap between maps
 
-
 # 3.1.12.4 Right canvas (transmission single-line map)
         self.map_canvas_right = tk.Canvas(maps_row, bg="#BFBFBF", highlightthickness=0)      # right image area
         self.map_canvas_right.grid(row=0, column=1, sticky="nsew", padx=(2, 0), pady=0)      # fill right cell
-
 
 # 3.1.12.5 Image refs/paths so Tk doesn’t GC the bitmaps
         self._map_img_left = None                                                            # PhotoImage for left canvas
@@ -330,11 +291,9 @@ class App(tk.Tk):
         self._map_img_path_left = None                                                       # file path for left image
         self._map_img_path_right = None                                                      # file path for right image
 
-
 # 3.1.13 Default pane heights — keep so maps are visible on startup
         self.after(80, lambda: vertical_pane.paneconfig(self.graphs_frame, height=600))      # graphs top ~220 px
         self.after(80, lambda: vertical_pane.paneconfig(self.map_frame,    height=100))      # maps middle ~400 px
-
 
 # 3.1.13.1 Load both maps (absolute paths)
         self.load_map_images(
@@ -342,8 +301,7 @@ class App(tk.Tk):
             r"C:\Users\chris\OneDrive - Victoria University of Wellington - STUDENT\Vic\ENGR489\Artifact\Single Line Map.png"    # right: single-line transmission map
         )
 
-
-# 3.1.14 Metric selector for results boxe
+# 3.1.14 Metric selector (combobox) for results boxes — DISABLED by default
         if SHOW_METRIC_SELECTOR:
             metric_bar = tk.Frame(self.graphs_frame, bg=DEFAULT_BG)     # horizontal container
             metric_bar.pack(side="top", fill="x", padx=8, pady=8)       # only created if flag True
@@ -358,30 +316,49 @@ class App(tk.Tk):
             self.metric_combo.pack(side="left", padx=8)
             self.metric_combo.bind("<<ComboboxSelected>>", lambda e: self.refresh_results())
 
+# 3.2 _check_pv_objects_on_startup: Query backend to see which PV objects exist in the PF model
+    def _check_pv_objects_on_startup(self):                         # runs once at startup to sanity-check that each PV object exists in the PowerFactory model
+# 3.2.1  Try to get PV object presence from backend
+        try:                                                        # attempt to connect to PowerFactory and ask the backend which PVs are present
+            import otaki_sim                                        # import here (local) so the GUI file can still import even if PF isn’t installed
+            app = otaki_sim.connect_and_activate()                  # ensure PF is running and the correct Project/Study Case is active; returns the app handle
+            _, missing_pvs = otaki_sim.get_pv_objects(app)          # query backend for PV objects; returns (present_dict, missing_list); we only need missing_list
+        except Exception:                                           # if anything fails (no PF, wrong path, no project), fail safe
+# 3.2.2 If backend fails, pessimistically mark all as missing
+            missing_pvs = list(sim.PV_CONFIG.keys())                # treat every configured PV as “missing” so the UI makes that obvious to the user
 
-# 3.2 _check_pv_objects_on_startup: passive check using backend lists (no PF calls)
-    def _check_pv_objects_on_startup(self):                                 # This method runs once at startup to mark each suburb as "Ready"                                           
-        for pv_key in sim.PV_LIST:                                          # Go through each declared PV key from the backend config
-            l1, l2 = self.result_lines[pv_key]                              # Grab the two result label widgets for this suburb
-            l1.configure(text="Ready", fg=OK_COLOUR)                        # Mark as "Ready" in green
-            l2.configure(text=f"Bus: {pv_key.replace('_PV','_0.415')}", fg="black")                                        # Display the expected bus name as a second line
-        
+# 3.2.2 Paint each suburb’s first result line as Found/Missing
+        for pv_key, meta in sim.PV_CONFIG.items():                  # iterate every suburb key that the GUI knows about
+            l1, l2 = self.result_lines[pv_key]                      # grab the two result label widgets for this suburb (top/bottom)
+            if pv_key in missing_pvs:                               # if backend said this PV object is missing from the model
+                l1.configure(text="Missing", fg=WARN_COLOUR)        # red  # show “Missing” in warning red on the first result line
+            else:                                                   # otherwise it exists in the currently active PF study case
+                l1.configure(text="Found", fg=OK_COLOUR)            # green  # show “Found” in OK green
+            l2.configure(text="", fg="black")                       # clear the second line for a clean startup state (no stale text/colour)
 
 # 3.3 _input_signature: Build a deterministic snapshot of sliders to compare runs
     def _input_signature(self):                                     # returns a compact, hashable record of current slider settings to tag results with
-
-
 # 3.3.1 Deterministic tuple of (pv_key, pct_int) sorted by key
         items = sorted((k, int(round(v.get()))) for k, 
                        v in self.slider_vars.items())               # build (key, integer_percent) pairs and sort for stability
         return tuple(items)                                         # make it immutable so we can compare cached signatures before updating result boxes
 
-
-# 3.4.0 _build_slider_row: Construct one two-row slider+labels group for a suburb
+# 3.4 _build_slider_row: Construct one two-row slider+labels group for a suburb
     def _build_slider_row(self, parent, row_base, pv_key):          # parent: container widget; row_base: top row index; pv_key: suburb backend key
-        #Two-row group starting at 'row_base'. Row A (row_base):col 0: suburb button (click → show curves), col 1: kW box, col 2: % box (aligned with slider right edge), col 3: result line 1 (just past slider) Row B (row_base+1): col 0–2: slider spans columns 0–2 fully, col 3: result line 2
-        full_name = SUBURB_FULL.get(pv_key, pv_key)                 # look up human-readable name for this suburb; fall back to key if missing
+        """
+        Two-row group starting at 'row_base'.
 
+        Row A (row_base):
+            col 0: suburb button (click → show curves)
+            col 1: kW box
+            col 2: % box (aligned with slider right edge)
+            col 3: result line 1 (just past slider)
+
+        Row B (row_base+1):
+            col 0–2: slider spans columns 0–2 fully
+            col 3: result line 2
+        """
+        full_name = SUBURB_FULL.get(pv_key, pv_key)                 # look up human-readable name for this suburb; fall back to key if missing
 
 #3.4.1 ROW A: Suburb button (click to plot curves for this suburb)
         name_btn = tk.Button(                                       # create a left-aligned button with the suburb’s name
@@ -393,7 +370,6 @@ class App(tk.Tk):
                       padx=(6, 0), pady=(4, 0))                     # place in row A, col 0, with small left/top padding
         self.suburb_buttons[pv_key] = name_btn                      # keep a handle so we can recolour/depress it when selected
 
-
 # 3.4.2 kW label (shows derived capacity = int(%)*6 kW)
         kw_lbl = tk.Label(parent, bd=1, relief="sunken", 
                           bg="white", fg="black",                   # sunken box look for a “readout” feel
@@ -403,43 +379,12 @@ class App(tk.Tk):
         self.kw_labels = getattr(self, 'kw_labels', {})             # ensure the dict exists (first time through)
         self.kw_labels[pv_key] = kw_lbl                             # store the label so _update_kw_label can target it later
 
-
-# 3.4.2.1 Get initial slider value from backend and create the variable
-        homes = int(self.pv_inverters.get(pv_key, 0))
-        print(f"[gui] build row for {pv_key}: homes={homes}")
-        var = tk.DoubleVar(value=homes)
-        self.slider_vars[pv_key] = var
-
-
-
-# 3.4.2.2 Build the slider (0..homes) and wire entry boxes
-        max_inv = int(self.pv_inverters.get(pv_key, 0))          # must be int
-        if pv_key not in self.slider_vars:                       # safety: var exists
-            self.slider_vars[pv_key] = tk.DoubleVar(value=max_inv)
-        var = self.slider_vars[pv_key]
-
-        slider = ttk.Scale(
-            parent, from_=0, to=100, orient="horizontal",
-            variable=var,
-            command=lambda _=None, k=pv_key: (
-                self._update_percent_entry(k),
-                self._show_percent_in_results(k),
-                self._update_kw_label(k),
-                self._touch_placeholder_capacity(k)
-            )
-        )
-        slider.grid(row=row_base + 1, column=0, columnspan=3,
-            sticky="ew", padx=(6, 0), pady=(0, 4))
-
-
-
-# 3.4.3 % box stays in sync with the slider
+# 3.4.3 % Entry box (text entry stays in sync with the slider)
         ent = ttk.Entry(parent, width=6, justify="right")           # small numeric entry field; right-aligned text
         ent.insert(0, "0")                                          # show 0 as the initial percentage
         ent.grid(row=row_base, column=2, sticky="e", 
                  padx=(2, 0), pady=(4, 0))                          # place in row A, col 2; align to the right
         self.percent_entries[pv_key] = ent                          # remember this entry to keep it synchronised with the slider
-
 
 # 3.4.4 Results line 1 (top result strip)
         res_line1 = tk.Label(parent, bd=1, relief="sunken", 
@@ -449,6 +394,9 @@ class App(tk.Tk):
                        padx=(8, 6), pady=(4, 0))                    # place in row A, col 3; allow it to stretch; add side/top padding
         self.result_labels[pv_key] = res_line1                      # keep a reference so other methods can update this label
 
+# 3.4.5 ROW B: slider + result line 2 (bottom)
+        var = tk.DoubleVar(value=0.0)                               # per-suburb variable backing the slider (float 0..100)
+        self.slider_vars[pv_key] = var                              # store the variable so we can read/update it elsewhere
 
 # 3.4.6 When the slider moves: sync % entry, show % in result line, update kW label, and keep placeholder PV capacity in step
         slider = ttk.Scale(                                         # create a horizontal slider for PV penetration %
@@ -463,7 +411,6 @@ class App(tk.Tk):
         )
         slider.grid(row=row_base + 1, column=0, columnspan=3,       # place the slider on row B spanning columns 0..2
                     sticky="ew", padx=(6, 0), pady=(0, 4))          # stretch horizontally; add side/bottom padding
-
 
 # 3.4.7 Sync entry → slider (user types a number; normalise to 0..100 and push back to slider)
         def commit_entry(*_):                                       # handler to commit typed % back into the slider/state
@@ -481,7 +428,6 @@ class App(tk.Tk):
         ent.bind("<Return>", commit_entry)                          # pressing Enter commits the typed value
         ent.bind("<FocusOut>", commit_entry)                        # leaving the field also commits the value
 
-
 # 3.4.8 Results line 2 (bottom result strip)
         res_line2 = tk.Label(parent, bd=1, relief="sunken", 
                              bg="white", fg="black",                
@@ -490,15 +436,13 @@ class App(tk.Tk):
                        padx=(8, 6), pady=(0, 4))                    # side/bottom padding to match the row’s spacing
         self.result_lines[pv_key] = (res_line1, res_line2)          # store both labels as a tuple for easy updates later
 
-
 # 3.4.9  Seed initial state for this suburb’s UI bits
         self._update_percent_entry(pv_key)                          # initialise the % Entry to match the slider (e.g., "0%")
         self._show_percent_in_results(pv_key)                       # paint the initial % on line 1 without clearing anything
         self._update_kw_label(pv_key)                               # compute and show initial kW ("0 kW")
-        self._touch_placeholder_capacity(pv_key)                      # make sure cache exists before using
+        self._touch_placeholder_capacity(pv_key)                    # set initial cached pv_pct/pv_kw so graphs can be drawn
 
-
-# 3.5.0 _normal_button_colours: Provide platform-default colours to reset suburb buttons
+# 3.5 _normal_button_colours: Provide platform-default colours to reset suburb buttons
     def _normal_button_colours(self):                               # utility: returns a consistent set of colours to “unselect” any suburb button
         """
         Return a dict of platform-default colours for tk.Button so we can restore
@@ -508,14 +452,11 @@ class App(tk.Tk):
             return {"bg": "SystemButtonFace", "fg": "black", 
                     "activebackground": "SystemButtonFace"}         # Windows/ttk default palette
         except Exception:
-
-
 # 3.5.1 Fallback for themes without SystemButtonFace
             return {"bg": DEFAULT_BG, "fg": "black", 
                     "activebackground": DEFAULT_BG}                 # fallback to app bg if theme doesn’t expose system colours
 
-
-# 3.6.0 _update_kw_label: Show calculated kW capacity based on rounded slider %
+# 3.6 _update_kw_label: Show calculated kW capacity based on rounded slider %
     def _update_kw_label(self, pv_key):                             # update the small “kW” readout next to the % entry for a given suburb
         """Update the kW label above the percent entry."""
         pct = float(self.slider_vars[pv_key].get())                 # read the current slider value (float 0..100)
@@ -525,8 +466,7 @@ class App(tk.Tk):
         if lbl:                                                     # if the label exists (it should)
             lbl.config(text=f"{kw_val} kW")                         # update the text to show the computed capacity
 
-
-# 3.7.0 _update_percent_entry: Keep the % Entry text synced with the slider ( 0 to 100)
+# 3.7 _update_percent_entry: Keep the % Entry text synced with the slider ( 0 to 100)
     def _update_percent_entry(self, pv_key):                        # mirror the slider percentage into the tiny Entry field as “NN%”
         """Sync the tiny % Entry with the slider (integer 0..100)."""
         pct = int(round(float(self.slider_vars[pv_key].get())))     # take the slider float and round to an integer percent
@@ -538,25 +478,66 @@ class App(tk.Tk):
             ent.delete(0, "end")                                    # clear current entry text
             ent.insert(0, pct_str)                                  # insert the fresh “NN%” string
 
-
-# 3.8.0 _show_percent_in_results: Paint the current % onto result line 1 (non-destructive)
+# 3.8 _show_percent_in_results: Paint the current % onto result line 1 (non-destructive)
     def _show_percent_in_results(self, pv_key):                     # optionally echo the live % on the first result line without wiping old results
         """Before/while running, show % on line 1, do not clear previous results."""
-        l1, _ = self.result_lines[pv_key]                         # fetch the first (top) results label for this suburb
-        pct = int(round(float(self.slider_vars[pv_key].get())))   # read and round the slider’s current value
-        l1.configure(text=f"{pct}%", fg="black")                  # show “NN%” in neutral black to indicate a pending change
+        # NOTE: You can implement the live % display here; currently a no-op placeholder.
+        # Example (uncomment to enable):
+        # l1, _ = self.result_lines[pv_key]                         # fetch the first (top) results label for this suburb
+        # pct = int(round(float(self.slider_vars[pv_key].get())))   # read and round the slider’s current value
+        # l1.configure(text=f"{pct}%", fg="black")                  # show “NN%” in neutral black to indicate a pending change
         pass                                                        # placeholder so the method is callable even if no live echo is desired
 
+# 3.9 _ensure_placeholder_curves: Seed/load simple 24-point load & PV arrays for plotting
+    def _ensure_placeholder_curves(self, pv_key):                   # ensure the suburb has basic curves to plot if real data isn’t available yet
+        """
+        If we don’t have real data from PowerFactory yet, seed placeholder 24-point arrays.
+        - Load: morning + evening peaks
+        - PV: bell/half-sine from ~06:00–18:00, scaled by current slider %
+        """
+        import math                                                 # local import for maths functions (exp, sin, pi)
+        st = self.suburb_state[pv_key]                              # grab the mutable state dict for this suburb
 
-# 3.9.0 _on_suburb_clicked: Highlight selection, sync state, ensure curves, draw plot
+# 3.9.1 24 hours
+        hours = list(range(24))                                     # simple 0..23 hour index (used for consistency; plotting uses range(24) directly later)
+
+# 3.9.2 Placeholder load curve (kW): base + peaks (07–09, 18–21)
+        if st["load_curve"] is None:                                # only create the synthetic load once (unless later replaced with real data)
+            base = [2.0] * 24                                       # start with a flat 2 kW base across all hours
+            for h in range(24):                                     # iterate each hour 0..23
+                morning = 2.5 * math.exp(-0.5 * 
+                                         ((h - 8) / 1.8) ** 2)      # Gaussian-like morning peak centred ~08:00
+                evening = 3.0 * math.exp(-0.5 * 
+                                         ((h - 19) / 2.2) ** 2)     # Gaussian-like evening peak centred ~19:00
+                base[h] += morning + evening                        # add peaks to the base for this hour
+            st["load_curve"] = base                                 # list of 24 floats representing kW load per hour
+
+# 3.9.3 Placeholder PV profile (kW): half-sine from 06–18, scaled by pv_kw “capacity”
+        if st["pv_profile"] is None:                                # only create synthetic PV once (unless we need to rescale later)
+            pv_cap = max(0.0, float(st.get("pv_kw", 0.0)))          # take the current capacity proxy from state; clamp to non-negative
+            pv = [0.0] * 24                                         # start with zeros for all hours
+            for h in range(6, 19):                                  # daylight window inclusive of 06:00..18:00
+                x = (h - 6) / 12.0                                  # normalise to 0..1 across the daylight window
+                pv[h] = pv_cap * math.sin(math.pi * x)              # half-sine from 0→peak→0 scaled by capacity
+            st["pv_profile"] = pv                                   # store the 24-point PV profile
+
+# 3.9.4 Re-scale PV if user changed slider since last seed
+        else:                                                       # if a profile already exists, rebuild it using the updated capacity (keeps shape, adjusts magnitude)
+            pv_cap = max(0.0, float(st.get("pv_kw", 0.0)))          # recalc capacity proxy from current slider-derived kW
+            pv = [0.0] * 24                                         # fresh zeroed list
+            for h in range(6, 19):                                  # same daylight window
+                x = (h - 6) / 12.0                                  # 0..1 normalised position in the day
+                pv[h] = pv_cap * math.sin(math.pi * x)              # recompute half-sine amplitude
+            st["pv_profile"] = pv                                   # write the updated PV profile back to state
+
+# 3.10 _on_suburb_clicked: Highlight selection, sync state, ensure curves, draw plot
     def _on_suburb_clicked(self, pv_key):                           # user clicked a suburb name; make it look selected and show its curves
         """Handle suburb button click: ensure data, then draw one suburb’s curves + visual highlight."""
         if not MPL_OK:                                              # if plotting support isn’t available, inform the user and bail gracefully
             messagebox.showinfo("Graphs", "Matplotlib not installed. Install it to see plots.")
             return
 
-
-# 3.9.1 Visually indicate selection: reset all, then depress + recolour clicked
+# 3.10.1 Visually indicate selection: reset all, then depress + recolour clicked
         normal = self._normal_button_colours()                      # get default button colours to restore non-selected buttons
         for btn in self.suburb_buttons.values():                    # iterate all suburb buttons and reset their styling
             try:
@@ -575,18 +556,18 @@ class App(tk.Tk):
                 relief="sunken", bg="#4A90E2", fg="white", activebackground="#4A90E2"
             )
 
-
-# 3.9.2 Keep state in sync with the current slider
+# 3.10.2 Keep state in sync with the current slider
         st = self.suburb_state[pv_key]                              # grab the cached state for this suburb
         st["pv_pct"] = float(self.slider_vars[pv_key].get())        # read current slider % (float 0..100)
         st["pv_kw"]  = int(round(st["pv_pct"])) * 6                 # derive kW capacity using 6 kW per 1% rule-of-thumb
 
+# 3.10.3 Ensure placeholder curves exist (until PowerFactory is wired up)
+        self._ensure_placeholder_curves(pv_key)                     # seed or rescale synthetic load/PV curves based on current capacity
 
-# 3.9.3 Draw the selected suburb’s curves
+# 3.10.4 Draw the selected suburb’s curves
         self._draw_suburb_curves(pv_key)                            # clear the axes and plot this suburb’s load and PV profiles
 
-
-# 3.10.0 _draw_suburb_curves: Render load/PV curves for selected suburb onto the axes
+# 3.11 _draw_suburb_curves: Render load/PV curves for selected suburb onto the axes
     def _draw_suburb_curves(self, pv_key):                           # draw the currently selected suburb’s load and PV profiles
         st = self.suburb_state[pv_key]                                # fetch cached state (contains curves and labels) for this suburb
         full_name = SUBURB_FULL.get(pv_key, pv_key)                   # resolve human-readable suburb name for the plot title
@@ -594,58 +575,45 @@ class App(tk.Tk):
         h = list(range(24))                                           # x-axis: 0..23 hours
         load = st.get("load_curve") or [0.0] * 24                     # y-series 1: load curve (fallback to zeros if missing)
         pv   = st.get("pv_profile") or [0.0] * 24                     # y-series 2: PV curve (fallback to zeros if missing)
-        tx   = st.get("tx_pct")     or [0.0] * 24                     # y-series 3: transformer % loading (fallback to zeros)
-        line = st.get("line_pct")   or [0.0] * 24                     # y-series 4: line % loading (fallback to zeros)
 
-        
-# 3.10.1 Clear both axes
-        self.ax.clear()                                               # wipe previous content on left y-axis
-        self.ax2.clear()                                              # wipe previous content on right y-axis
-
-
-# 3.10.2 Left Y-Axis: Load and PV in kW
+        self.ax.clear()                                               # wipe any previous plot content
         self.ax.grid(True, linestyle="--", linewidth=0.5)             # light dashed grid for readability
-        load_line, = self.ax.plot(h, load, label="Load (kW)")         # plot load with handle for legend
-        pv_line,   = self.ax.plot(h, pv,   label="PV (kW)")           # plot PV with handle for legend
+        self.ax.plot(h, load, label="Load (kW)")                      # plot load vs hour with legend label
+        self.ax.plot(h, pv,   label="PV (kW)")                        # plot PV vs hour with legend label
+        self.ax.set_xlim(0, 23)                                       # clamp x-axis to the 24-hour range
+        self.ax.set_xticks([0, 4, 8, 12, 16, 20, 23])                 # choose legible tick marks across the day
+        self.ax.set_xlabel("Hour")                                    # axis label for hours
+        self.ax.set_ylabel("kW")                                      # axis label for power in kW
+        self.ax.set_title(full_name)                                  # set the figure title to the suburb’s name
+        self.ax.legend(loc="best")                                    # show legend in the best available spot
+        self.canvas_mpl.draw_idle()                                   # ask Tkinter-embedded canvas to redraw without blocking
 
-        self.ax.set_xlim(0, 23)                                       # clamp x-axis to 24-hour range
-        self.ax.set_xticks([0, 4, 8, 12, 16, 20, 23])                 # readable ticks
-        self.ax.set_xlabel("Hour")                                    # x-axis label
-        self.ax.set_ylabel("kW")                                      # left y-axis label
+# 3.12 _touch_placeholder_capacity: Keep cached pv_pct/pv_kw aligned with the slider
+    def _touch_placeholder_capacity(self, pv_key):                    # ensure the cache mirrors current slider % and derived kW
+        """
+        Keep cached pv_pct/pv_kw aligned with the slider.
+        Safe to call during widget construction (auto-creates dict entry).
+        """
+# 3.12.1 ensure dict exists (paranoia)
+        if not hasattr(self, 
+                       "suburb_state") or self.suburb_state is None:  # if the cache isn’t initialised for some reason
+            self.suburb_state = {}                                    # create an empty dict to hold per-suburb state
 
+# 3.12.2 get/create this suburb's state (minimal baseline)
+        st = self.suburb_state.get(pv_key, {                          # look up existing state or build a minimal one on the fly
+            "pv_pct": 0.0,                                            # current slider percentage
+            "pv_kw":  0.0,                                            # derived coarse capacity in kW
+            "u_min": None, "u_max": None, "ok": None,                 # placeholders for backend voltage/flag results
+            "load_curve": None, "pv_profile": None,                   # placeholders for time-series used in plots
+            "bus": sim.PV_CONFIG.get(pv_key, {}).get("bus")           # convenience pointer to the associated LV bus name
+        })
 
-# 3.10.3 Right Y-Axis: Transformer and Line loading in %
-        tx_line, = self.ax2.plot(h, tx, label="Tx Load (%)",
-                                  linestyle="--")                     # dashed line for transformer load
-        ln_line, = self.ax2.plot(h, line, label="Line Load (%)", 
-                                 linestyle=":")                       # dotted line for line load
-        self.ax2.set_ylabel("% Loading")                              # right y-axis label
-        self.ax2.set_ylim(0, 120)                                     # optionally clamp right axis to 0–120% (adjust as needed)
+# 3.12.3 update from current slider 
+        pct = float(self.slider_vars[pv_key].get())                   # read the live slider value as a float
+        st["pv_pct"] = pct                                            # store the percent back into the state cache
+        st["pv_kw"]  = int(round(pct)) * 6                            # convert to whole-percent then to kW (6 kW per 1%)
 
-
-# 3.10.4 Legend: merge both axes' legends into one
-        lines = [load_line, pv_line, tx_line, ln_line]                # gather all lines
-        labels = [line.get_label() for line in lines]                 # get their labels
-        self.ax.legend(lines, labels, loc="best")                     # show a unified legend
-
-
-# 3.10.5 Title and refresh
-        self.ax.set_title(full_name)                                  # title = suburb name
-        self.canvas_mpl.draw_idle()                                   # redraw figure without blocking
-
-
-# 3.11.0 _touch_placeholder_capacity:                                 # Ensure initial %/kW are populated from backend
-    def _touch_placeholder_capacity(self, pv_key):                    # Create initial cached state for suburb using backend PV_CONFIG.
-        if not hasattr(self, "suburb_state") or self.suburb_state is None:
-            self.suburb_state = {}
-        st = self.suburb_state.get(pv_key, {})
-        if "pv_pct" not in st:                                        # Use backend config: 1% per home
-            homes = sim.PV_CONFIG.get(pv_key, {}).get("homes", 0)
-            st["pv_pct"] = homes
-            st["pv_kw"]  = int(round(homes)) * 6
-        if "bus" not in st:
-            st["bus"] = sim.PV_CONFIG.get(pv_key, {}).get("bus")
-        self.suburb_state[pv_key] = st
+        self.suburb_state[pv_key] = st                                # write updated state back to the cache
 
 
 # =====================================================================================================================================================
@@ -656,7 +624,8 @@ class App(tk.Tk):
 
 
 # 4.1 open_settings: single-instance window; cog stays “sunken” while open and restores on close
-    def open_settings(self):                                                         # If a settings window already exists, just raise/focus it (don’t create another)
+    def open_settings(self):
+        # If a settings window already exists, just raise/focus it (don’t create another)
         if self._settings_win and self._settings_win.winfo_exists():                 # window already open
             try:
                 self._settings_win.deiconify(); self._settings_win.lift(); self._settings_win.focus_force()
@@ -757,12 +726,12 @@ class App(tk.Tk):
             self._recurse_bg(child, bg, fg)
 
 
+
 # # =====================================================================================================================================================
 # # =====================================================================================================================================================
 # # 5.0 ---------- Load Map to GUI ----------  
 # # =====================================================================================================================================================
 # # =====================================================================================================================================================
-
 
 # 5.1 load_map_images: accept two paths (left/right), validate, remember, and draw both
     def load_map_images(self, left_path, right_path):                            # load two map images at once
@@ -849,65 +818,45 @@ class App(tk.Tk):
 
 # 6.2 _current_slider_map: Read all sliders and keep the cache in sync
     def _current_slider_map(self):
-        d = {k: v.get() for k, v in self.slider_vars.items()}           # Build {pv_key: inverter_count} from slider values
-
-# 6.2.1 Keep cache in sync with current slider values
-        for pv_key, inv_count in d.items():                             # Update cached state so inverter/plots stay current
+        d = {k: v.get() for k, v in self.slider_vars.items()}           # build {pv_key: percent_float} from all DoubleVars
+# 6.2.1 keep cache in sync with current slider values
+        for pv_key, pct in d.items():                                   # update per-suburb cached state so kW/plots stay current
             st = self.suburb_state[pv_key]
-            st["pv_inv"] = int(round(inv_count))                        # Store the number of inverters (integer)
-            st["pv_kw"]  = int(round(inv_count)) * 6                    # Optional: rough capacity estimate (1 inv = 6 kW)
-        return d                                                        # Return the mapping for the backend to pass to sim
+            st["pv_pct"] = float(pct)                                   # store the slider %
+            st["pv_kw"]  = int(round(float(pct))) * 6                   # derive coarse capacity (6 kW per 1%)
+        return d                                                        # return the mapping for the backend call
 
-
-# # 6.3.0 _run_model_thread: Call backend with current sliders, process results, handle errors
+# 6.3 _run_model_thread: Call backend with current sliders, process results, handle errors
     def _run_model_thread(self):
         try:
-            # Gather inputs and sync cache
-            sliders = self._current_slider_map()
-            # Run the Ōtaki simulation (QDS-only in your current sim code)
-            results = sim.set_penetrations_and_run(sliders)
-            # Stash for debugging if you like
-            self.last_limits = results
-            # Push results into the GUI cache
-            self._update_cache_from_results(results)
+            sliders = self._current_slider_map()                        # gather inputs and sync cache
+            results = sim.set_penetrations_and_run(sliders)             # run the Ōtaki simulation in the backend
+            self.last_limits = results                                  # stash raw results for any later inspection
+            self._update_cache_from_results(results)                    # write min/max/ok (etc.) into GUI cache (expects this helper to exist)
 
-# 6.3.1 (legacy) scan – safe to keep but harmless now
-            missing_pvs_legacy = []
-            for bus, info in (results or {}).items():
+# 6.3.1 Check for missing PV objects in results
+            missing_pvs = []                                            # legacy scan: looks for “reason: Missing PV object: <key>”
+            for bus, info in results.items():                           # iterate top-level items (only useful if backend returned legacy shape)
                 if isinstance(info, dict) and 'reason' in info and 'Missing PV object' in info['reason']:
-                    missing_pvs_legacy.append(info['reason'].split(': ')[-1])
+                    missing_pvs.append(info['reason'].split(': ')[-1])  # extract pv_key from the reason string
 
-# 6.3.2 preferred: explicit list from backend
-            missing_pvs = (results or {}).get("missing_pv", []) or missing_pvs_legacy
-            if missing_pvs:
-                msg = "These PV objects are missing in the PowerFactory model:\n" + ", ".join(missing_pvs)
-                # Capture the string now so lambda doesn't close over a dead variable
-                self.after(0, lambda m=msg: messagebox.showwarning("Missing PV Objects", m))
+# 6.3.2 After: results = sim.set_penetrations_and_run(sliders)
+            missing_pvs = (results or {}).get("missing_pv", [])         # preferred new format: backend provides an explicit list
+            if missing_pvs:                                             # if any PV objects were not found in the PF model
+                self.after(0, lambda: messagebox.showwarning(           # show a non-blocking warning popup on the Tk event loop
+                    "Missing PV Objects",
+                    "These PV objects are missing in the PowerFactory model:\n" + ", ".join(missing_pvs)
+                ))
 
-        except Exception as e:
-            # Capture the message immediately; don't reference 'e' inside the lambda
-            msg = f"{e.__class__.__name__}: {e}"
-            self.after(0, lambda m=msg: messagebox.showerror("Run failed", m))
+        except Exception as e:                                          # any exception during run → show an error dialog (non-blocking)
+            self.after(0, lambda: messagebox.showerror("Run failed", str(e)))
         finally:
-            # Re-enable UI no matter what
-            self.after(0, self._after_run_ui)
-
+            self.after(0, self._after_run_ui)                           # regardless of success/failure, re-enable the UI safely via Tk thread
 
 # 6.4 _after_run_ui: Refresh result labels and re-enable the RUN button
     def _after_run_ui(self):
-        # Call refresh_results only if it exists and is callable
-        fn = getattr(self, "refresh_results", None)
-        if callable(fn):
-            try:
-                fn()
-            except Exception as _:
-                # swallow UI refresh errors to avoid wedging the button
-                pass
-        # Always re-enable the RUN button
-        try:
-            self.run_btn.config(state="normal", text="RUN")
-        except Exception:
-            pass
+        self.refresh_results()                                          # repaint the per-suburb result strips based on updated cache
+        self.run_btn.config(state="normal", text="RUN")                 # re-enable the RUN button and restore its label
 
 
 
@@ -918,63 +867,39 @@ class App(tk.Tk):
 # =====================================================================================================================================================
 
 
-# # 7.1 _update_cache_from_results: Copy backend values (min/max/ok) into the GUI’s per-suburb cache
-def _update_cache_from_results(self, results):
-    """
-    Make the GUI cache match the backend results.
-    Accept limits keyed by *resolved* PF terminal names (e.g., OTKa_0.415)
-    as well as simple configured names (e.g., OTKa).
-    """
-    import time
-    now = time.time()
+# 7.1 _update_cache_from_results: Copy backend values (min/max/ok) into the GUI’s per-suburb cache
+    def _update_cache_from_results(self, results):
+        """
+        Make the GUI cache match the backend results.
+        - New backend: bus limits live under results["limits"].
+        - Legacy fallback: if no "limits", assume top-level bus keys.
+        """
+        import time                                                     # local import for simple timestamping
+        now = time.time()                                               # epoch seconds; used to mark when a suburb’s cache was last updated
 
-    # Build a flexible matcher: exact configured name -> pv_key, and also allow prefix matches
-    # Example: a result bus "OTKa_0.415" should map to configured "OTKa".
-    cfg_bus_to_key = {bus: pv_key for pv_key, bus in sim.PV_CONFIG.items()}  # exact map
-    cfg_items = list(cfg_bus_to_key.items())                           # list of (cfg_bus, pv_key) for prefix matching
+# 7.1.1 Map bus -> pv_key once (PV_CONFIG comes from otaki_sim)
+        bus_to_pv = {v["bus"]: k for k, v in sim.PV_CONFIG.items()}     # reverse map: LV bus name → suburb key (pv_key)
 
-    # Prefer the new-place limits, else fall back to old top-level shape
-    limits_dict = (results or {}).get("limits")
-    if not isinstance(limits_dict, dict):
-        limits_dict = results or {}
+# 7.1.2 Prefer the new-place limits, else fall back to old top-level shape
+        limits_dict = (results or {}).get("limits")                     # new backend: results contains a "limits" dict keyed by bus
+        if not isinstance(limits_dict, dict):                           # if missing or wrong type, assume legacy shape (top-level bus keys)
+            limits_dict = results or {}                                 # tolerate None by treating it as {}
 
-    # Helper to locate pv_key from a result bus name (resolved PF terminal)
-    def match_pv_key(result_bus: str):
-        pv_key = cfg_bus_to_key.get(result_bus) # 1) exact match first
-        if pv_key:
-            return pv_key
-        # 2) prefix rule: if result_bus starts with a configured bus token, accept it
-        #    e.g. "OTKa_0.415" startswith "OTKa" → map to that suburb
-        for cfg_bus, key in cfg_items:
-            if result_bus.startswith(cfg_bus):
-                return key
-        # 3) last resort: contains (more lenient)
-        for cfg_bus, key in cfg_items:
-            if cfg_bus in result_bus:
-                return key
-        return None
-
-    # Consume limits (min/max/ok) and write into suburb_state
-    for bus, info in limits_dict.items():
-        if not isinstance(info, dict):
-            continue
-        pv_key = match_pv_key(bus)         # map resolved bus name back to GUI suburb key
-        if not pv_key:
-            continue
-
-        st = self.suburb_state.get(pv_key)
-        if not st:
-            continue
-        st["u_min"] = info.get("u_min")
-        st["u_max"] = info.get("u_max")
-        st["ok"]    = info.get("ok", True)
-        st["last_updated"] = now
-
+        for bus, info in limits_dict.items():                           # iterate each bus → info block (expects dicts with u_min/u_max/ok)
+            if not isinstance(info, dict):                              # skip anything that isn’t a dict (defensive)
+                continue                                                # ignore non-dict entries
+            pv_key = bus_to_pv.get(bus)                                 # find which suburb this bus corresponds to
+            if not pv_key:                                              # if the bus isn’t in our PV_CONFIG mapping, ignore it
+                continue                                                # unknown bus → skip
+            st = self.suburb_state[pv_key]                              # pull the cached state record for this suburb
+            st["u_min"] = info.get("u_min")                             # write minimum per-unit voltage if present
+            st["u_max"] = info.get("u_max")                             # write maximum per-unit voltage if present
+            st["ok"]    = info.get("ok", True)                          # default to True (OK) if backend didn’t include a flag
+            st["last_updated"] = now                                    # remember when we last updated this suburb’s results
 
 # 7.2 _update_result_text: (reserved) Format-specific text updates per suburb (currently unused; kept for future)
     def _update_result_text(self, pv_key):
         pass                                                            # placeholder: hook for custom text formatting if metrics become more complex later
-
 
 # 7.3 refresh_results: Read cache + metric selection and repaint the two-line labels for each suburb
     def refresh_results(self):
@@ -986,7 +911,7 @@ def _update_cache_from_results(self, results):
                 l2.configure(text="", fg="black")                       # clear bottom line
             return                                                      # nothing else to do until a run occurs
 
-        for pv_key in sim.PV_CONFIG.keys():                      # per-suburb redraw
+        for pv_key, meta in sim.PV_CONFIG.items():                      # per-suburb redraw
             st = self.suburb_state[pv_key]                              # stored values for this suburb
             l1, l2 = self.result_lines[pv_key]                          # top/bottom result labels
 
@@ -999,15 +924,14 @@ def _update_cache_from_results(self, results):
             col = OK_COLOUR if st.get("ok", True) else WARN_COLOUR      # green when OK; red when out-of-limits
 
             if st["u_min"] is not None:                                 # if there is a minimum value
-                l1.configure(text=f"Min = {st['u_min']:.4f} pu", fg=col)# render min with 4 dp
+                l1.configure(text=f"Min = {st['u_min']:.4f} pu", fg=col)# render min with 4 dp in current colour scheme
             else:
                 l1.configure(text="Min: n/a", fg="black")               # draw n/a when missing
 
             if st["u_max"] is not None:                                 # if there is a maximum value
-                l2.configure(text=f"Max = {st['u_max']:.4f} pu", fg=col)# render max with 4 dp
+                l2.configure(text=f"Max = {st['u_max']:.4f} pu", fg=col)# render max with 4 dp in current olour scheme
             else:
                 l2.configure(text="Max: n/a", fg="black")               # draw n/a when missing
-
 
 
 # =====================================================================================================================================================
