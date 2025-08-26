@@ -1,680 +1,568 @@
-# Otaki_sim.py
-# ENGR489 PowerFactory model - Mo Working Code
+#====================================================================================================
+# 1.0 ✅ Set Up Environment
+#====================================================================================================
 
 
-# =====================================================================================================================================================
-# =====================================================================================================================================================
-# 1.0 ---------- Setup & configuration ----------  # imports, PowerFactory environment, user settings, PV mapping
-# =====================================================================================================================================================
-# =====================================================================================================================================================
-
-# 1.1 Standard library imports  
-import sys                                                                  
-import os                                                                   
-import json                                                                 
-import math                   
-import datetime as dt         
-from collections import defaultdict
-import numpy as np   
-
-# 1.2 PowerFactory import 
-DIG_PATH = r"C:\Program Files\DIgSILENT\PowerFactory 2025 SP1\Python\3.9"   # PF’s bundled Python site-packages path (adjust if your install differs)
-if os.path.isdir(DIG_PATH) and DIG_PATH not in sys.path:                    # only append if the folder exists and isn’t already on sys.path
-    sys.path.append(DIG_PATH)                                               # allow `import powerfactory` to resolve when launched within PF
-    os.environ["PATH"] += ";" + DIG_PATH                                    # also extend PATH for any PF-side DLL lookups
+import os, sys, time
+DIG_PATH = r"C:\Program Files\DIgSILENT\PowerFactory 2025 SP1\Python\3.9"
+sys.path.append(DIG_PATH)
+os.environ['PATH'] += ';' + DIG_PATH
+import powerfactory as pf
 
 
-try:
-    import powerfactory                                                     # guarded import; if this works we’re likely running within PF’s Python
-except Exception:
-    powerfactory = None                                                     # we’ll check this before any PF calls  # sentinel so code can detect lack of PF at runtime
+# 1.1.0 Project and Study Case Names-----------------------------------------------------------------
+PROJECT_NAME    = "ENGR489 Otaki Grid Base Solar and Bat(1)"
+STUDY_CASE_NAME = "Study Case"
 
 
-# 1.3 Initial settings  
-USE_QDS_FIRST = True                                                        # prefer quasi-dynamic simulation (time series) if the study case supports it
-QDS_TSTART_S  = 0.0                                                         # start time in seconds from midnight (0 = 00:00)
-QDS_TSTOP_S   = 24*3600.0                                                   # stop time in seconds (24 hours window)
-QDS_DT_S      = 3600.0                                                      # simulation step size in seconds (1 hour steps)
-V_OK_MIN      = 0.95                                                        # lower acceptable voltage limit in per-unit
-V_OK_MAX      = 1.05                                                        # upper acceptable voltage limit in per-unit
-PDF_DEFAULT   = os.path.abspath("otaki_results.pdf")                        # default output path for generated PDF report
+# 1.2.0 Quasi-Dynamic Simulation Timing Settings ----------------------------------------------------
+QDS_STEP_SIZE   = 1   # Step size in hours
+QDS_STEP_UNIT   = 2   # 0 = seconds, 1 = minutes, 2 = hours, 3 = days
+QDS_CALC_PERIOD = 0   # 0 = full day, 12 = 12 hours
 
-# 1.6 PV configuration (keys must match GUI)                                # GUI keys mapped to PF bus + category
-PV_CONFIG = {
-    # suburb_key : {"bus": "<bus name in PF>", "type": "res"/"com"/"ind"/"school"}
-    "OTBa_PV": {"bus": "OTBa", "type": "res"},                              # Ōtaki Beach A, residential
-    "OTBb_PV": {"bus": "OTBb", "type": "res"},                              # Ōtaki Beach B, residential
-    "OTBc_PV": {"bus": "OTBc", "type": "res"},                              # Ōtaki Beach C, residential
-    "OTCa_PV": {"bus": "OTCa", "type": "com"},                              # Ōtaki Commercial A
-    "OTCb_PV": {"bus": "OTCb", "type": "com"},                              # Ōtaki Commercial B
-    "OTIa_PV": {"bus": "OTIa", "type": "ind"},                              # Ōtaki Industrial
-    "OTKa_PV": {"bus": "OTKa", "type": "res"},                              # Ōtaki Township A
-    "OTKb_PV": {"bus": "OTKb", "type": "res"},                              # Ōtaki Township B
-    "OTKc_PV": {"bus": "OTKc", "type": "res"},                              # Ōtaki Township C
-    "OTS_PV" : {"bus": "OTS",  "type": "school"},                           # Ōtaki College (school)
-    "RGUa_PV": {"bus": "RGUa", "type": "res"},                              # Rangiuru A
-    "RGUb_PV": {"bus": "RGUb", "type": "res"},                              # Rangiuru B
-    "TRE_PV" : {"bus": "TRE",  "type": "res"},                              # Te Roto
-    "WTVa_PV": {"bus": "WTVa", "type": "res"},                              # Waitohu Valley A
-    "WTVb_PV": {"bus": "WTVb", "type": "res"},                              # Waitohu Valley B
-    "WTVc_PV": {"bus": "WTVc", "type": "res"},                              # Waitohu Valley C
+
+# 1.3.0 Print Results in Terminal ------------------------------------------------------------------
+PRINT_BUS_HOURLY        = False
+PRINT_LOAD_HOURLY       = False
+PRINT_PV_HOURLY         = False
+PRINT_TX_HOURLY         = False
+PRINT_BUS_MIN_MAX       = False
+PRINT_LINE_HOURLY       = False
+PRINT_VARIABLE_CHECKS   = False
+PRINT_PV_META           = True
+PRINT_PV_OVERRIDES      = False
+
+
+# 1.4.0 PV panel wattage (per panel)
+PANEL_WATT = 240.0  # W
+
+
+# 1.5.0 Results Store and Monitor Registry
+RESULTS   = {"bus": {}, "load": {}, "pv": {}, "tx": {},"line": {}}
+ASSOC     = {}   # load ➜ {"bus": <bus>, "pv": [..], "tx": [..], "line": [..]}
+MONITORED = []   # list of (selector, [vars]) for GUI
+
+# 1.6.0 PV inverter overrides (GUI sets before run)
+PV_INV_OVERRIDES = {}
+
+
+# 1.5.0 Full Bus Element List-------------------------------------------------------------------------
+BUS_LIST = {
+    "OTBa_0.415",
+    "OTBb_0.415",
+    "OTBc_0.415",
+    "OTCa_0.415",
+    "OTCb_0.415",
+    "OTIa_0.415",
+    "OTKa_0.415",
+    "OTKb_0.415",
+    "OTKc_0.415",
+    "OTS_0.415",
+    "RGUa_0.415",
+    "RGUb_0.415",
+    "TRE_0.415",
+    "WTVa_0.415",
+    "WTVb_0.415",
+    "WTVc_0.415",
 }
 
-# 1.7 Capacity rules (kW) for slider meaning  # maps slider percentage to applied PV capacity by site type
-"""
-residential: slider 0..100 maps to 0..100 inverters at 6 kW each (npar)
-commercial/industrial: max 100 kW (fixed P setpoint)
-school: max 25 kW (fixed P setpoint)
-"""
-RES_KW_PER_INVERTER = 6.0                                                   # each residential percent is 1 inverter & 6 kW
-COM_MAX_KW   = 100.0                                                        # cap for commercial sites
-IND_MAX_KW   = 100.0                                                        # cap for industrial sites
-SCH_MAX_KW   = 25.0                                                         # cap for school site
+
+# 1.6.0 Full Load Element List------------------------------------------------------------------------ 
+LOAD_LIST = {
+    "Otaki Beach A",
+    "Otaki Beach B",
+    "Otaki Beach C",
+    "Otaki Commercial A",
+    "Otaki Commercial B",
+    "Otaki Industrial A",
+    "Otaki School",
+    "Otaki Town A",
+    "Otaki Town B",
+    "Otaki Town C",
+    "Rangiuru Rd A",
+    "Rangiuru Rd B",
+    "Te Rauparaha St",
+    "Waitohu Valley A",
+    "Waitohu Valley B",
+    "Waitohu Valley C",
+}
 
 
-
-# =====================================================================================================================================================
-# =====================================================================================================================================================
-# 2.0 ---------- PowerFactory Connection 
-# =====================================================================================================================================================
-# =====================================================================================================================================================
-
-# 2.1 Connect to PowerFactory, make sure a project is active, return the Application object
-def connect_and_activate():
-    """
-    Start/attach to PowerFactory and return the Application object.
-    Uses GetApplicationExt to ensure proper error propagation.  :contentReference[oaicite:6]{index=6}
-    """
-    if powerfactory is None:                                                # make sure this only runs inside PF python bit
-        raise RuntimeError("This module must be run inside the PowerFactory Python environment.")
-    app = powerfactory.GetApplicationExt()                                  # raises if PF cannot start :contentReference[oaicite:7]{index=7}  # request app handle with better error propagation
-    app.Show()                                                              # make UI visible (optional)  :contentReference[oaicite:8]{index=8}  # bring the PF GUI to the foreground
-    prj = app.GetActiveProject()                                            # fetch the currently active project (if any)
-    if not prj:                                                             # no project open 
-        raise RuntimeError("No active project. Please open your project/study case.")
-    return app                                                              # return the live Application object for further API calls
-
-# 2.2 Make sure a Study Case is active and return it
-def get_studycase(app):
-    sc = app.GetActiveStudyCase()                                           # ask PF for the active Study Case on this project
-    if not sc:                                                              # none selected, you will have to activate one
-        raise RuntimeError("No active Study Case. Please activate a study case.")
-    return sc                                                               # return the Study Case object
-
-# 2.3 Build a name,terminal map for all buses wanted
-def get_bus_objects(app):
-    buses = {}                                                              # prepare result dict: {loc_name: ElmTerm}
-    for term in app.GetCalcRelevantObjects("*.ElmTerm") or []:              # :contentReference[oaicite:9]{index=9}  # iterate LV/HV terminals in the active calc scope
-        buses[term.loc_name] = term                                         # map human-readable name to the terminal object
-    return buses                                                            # return the mapping for quick lookups by name
-
-# 2.4 Find the PV object that the GUI is asking for
-def get_pv_objects(app):
-    """
-    Return dict {pv_key: ElmGenstat} matching PV_CONFIG entries by name pattern.
-    You can adapt matching to your actual naming in the model.
-    """
-    pv_dict = {}                                                            # result mapping: GUI pv_key → PF object
-                                                                            # Try PV systems, then generic stat gens (model-dependent)
-    candidates = (app.GetCalcRelevantObjects("*.ElmPvsys") or []
-                  ) + (app.GetCalcRelevantObjects("*.ElmGenstat") or [])    # :contentReference[oaicite:10]{index=10}  # include static generators as fallback
-    by_name = {obj.loc_name: obj for obj in candidates}                     # quick index by object display name
-    for key, meta in PV_CONFIG.items():                                     # iterate all configured PV keys expected by the GUI
-        guess = key                                                         # first guess: object named exactly like the pv_key
-        obj = by_name.get(guess)                                            # try direct match
-        if obj is None:                                                     # if not found, try an alternative naming scheme
-            alt = f"{meta['bus']}_PV"                                       # e.g., busname_PV
-            obj = by_name.get(alt)                                          # look up the alternate name
-        if obj:                                                             # if either guess worked, record the mapping
-            pv_dict[key] = obj
-    missing = [k for k in PV_CONFIG.keys() if k not in pv_dict]             # anything not resolved is considered missing
-    return pv_dict, missing                                                 # return both the found objects and a list of missing pv_keys
-
-# 2.5 Find lines, transformers, and loads that are relevant to the active calculation
-def discover_network_elements(app):
-    """Find lines, trafos, loads used by the active calculation."""
-    lines  = app.GetCalcRelevantObjects("*.ElmLne") or []                   # :contentReference[oaicite:11]{index=11}  # line elements
-    traf2  = app.GetCalcRelevantObjects("*.ElmTr2") or []                   # :contentReference[oaicite:12]{index=12}  # 2-winding transformers
-    traf3  = app.GetCalcRelevantObjects("*.ElmTr3") or []                   # :contentReference[oaicite:13]{index=13}  # 3-winding transformers
-    trafos = (traf2 or []) + (traf3 or [])                                  # merge into a single list
-    loads  = app.GetCalcRelevantObjects("*.ElmLod") or []                   # :contentReference[oaicite:14]{index=14}  # load elements
-    return {"lines": lines, "trafos": trafos, "loads": loads}               # package everything into a dict for convenience
+#1.7.0 Full PV Element list---------------------------------------------------------------------------
+PV_LIST = {
+    "OTBa_PV",
+    "OTBb_PV",
+    "OTBc_PV",
+    "OTCa_PV",
+    "OTCb_PV",
+    "OTIa_PV",
+    "OTKa_PV",
+    "OTKb_PV",
+    "OTKc_PV",
+    "OTS_PV",
+    "RGUa_PV",
+    "RGUb_PV",
+    "TRE_PV",
+    "WTVa_PV",
+    "WTVb_PV",
+    "WTVc_PV",
+}
 
 
+#1.8.0 Full TX Element list--------------------------------------------------------------------------
+TX_LIST = {
+    "OTB_T1",
+    "OTB_T2",
+    "OTB_T3",
+    "OTCa_T1",
+    "OTCb_T1",
+    "OTI_T1",
+    "OTK_T1",
+    "OTK_T2",
+    "OTK_T3",
+    "OTS_T1",
+    "RGU_T1",
+    "RGU_T2",
+    "TRE_T1",
+    "WTV_T1",
+    "WTV_T2",
+    "WTV_T3",
+}
 
-# =====================================================================================================================================================
-# =====================================================================================================================================================
-# 3.0 ---------- Change PV to match sliders                                 # apply GUI slider values to the PF PV objects
-# =====================================================================================================================================================
-# =====================================================================================================================================================
 
-# 3.1 Map 0..100% → 0..100 parallel inverters (≈6 kW each)
-def _apply_residential_pv(pv_obj, percent):
-    npar = int(round(max(0.0, min(100.0, percent))))                        # Lock percent to [0,100], round, and treat as number of inverters
-    try:
-        pv_obj.npar = npar                                                  # set number of parallel units on the PF PV object
-    except Exception:
-        pass                                                                # if the object doesn’t expose npar, swallow and continue (defensive)
+#1.9.0 Full Line Element list------------------------------------------------------------------------
+LINE_LIST = {
+    "OTBa_pline_OTBa_0.415",
+    "OTBb_pline_OTBb_0.415",
+    "OTBc_pline_OTBc_0.145",
+    "OTCa_pline_OTCa_0.415",
+    "OTCb_pline_OTCb_0.415",
+    "OTIa_pline_OTIa_0.415",
+    "OTKa_pline_OTKa_0.415",
+    "OTKb_pline_OTKb_0.415",
+    "OTKc_pline_OTKc_0.415",
+    "OTS_pline_OTS_0.415",
+    "RGUa_pline_RGUa_0.415",
+    "RGUb_pline_RGUb_0.415",
+    "TRE_pline_TRE_0.415",
+    "WTVa_pline_WTVa_0.415",
+    "WTVb_pline_WTVb_0.415",
+    "WTVc_pline_WTVc_0.415",
+}
 
-# 3.2 For non-resi sites, write a kW (or MW) setpoint
-def _apply_fixed_kw(pv_obj, kw):
-    """
-    For commercial/industrial/school — directly set active power setpoint (pgini) in kW.
-    Some models use MW; if so, divide by 1000.
-    """
-    try:                                                                    # Detect unit by magnitude of the rated power if available
-        pv_obj.pgini = kw                                                   # prefer kW if the model expects kW
-    except Exception:
-        try:
-            pv_obj.pgini = kw / 1000.0                                      # fallback: some templates define pgini in MW
-        except Exception:
-            pass                                                            # if neither assignment works, ignore (object mismatch)
+# 1.10.0 mapping for GUI use
+PV_CONFIG = {
+    "OTBa_PV": {"bus": "OTBa_0.415", "load": "OTBa", "pline": "OTBa_pline_OTBa_0.415", "tx": "OTB_T1", "homes": 100},
+    "OTBb_PV": {"bus": "OTBb_0.415", "load": "OTBb", "pline": "OTBb_pline_OTBb_0.415", "tx": "OTB_T2", "homes": 100},
+    "OTBc_PV": {"bus": "OTBc_0.415", "load": "OTBc", "pline": "OTBc_pline_OTBc_0.145", "tx": "OTB_T3", "homes": 100},
+    "OTCa_PV": {"bus": "OTCa_0.415", "load": "OTCa", "pline": "OTCa_pline_OTCa_0.415", "tx": "OTCa_T1", "homes": 1},
+    "OTCb_PV": {"bus": "OTCb_0.415", "load": "OTCb", "pline": "OTCb_pline_OTCb_0.415", "tx": "OTCb_T1", "homes": 1},
+    "OTIa_PV": {"bus": "OTIa_0.415", "load": "OTIa", "pline": "OTIa_pline_OTIa_0.415", "tx": "OTI_T1", "homes": 1},
+    "OTKa_PV": {"bus": "OTKa_0.415", "load": "OTKa", "pline": "OTKa_pline_OTKa_0.415", "tx": "OTK_T1", "homes": 100},
+    "OTKb_PV": {"bus": "OTKb_0.415", "load": "OTKb", "pline": "OTKb_pline_OTKb_0.415", "tx": "OTK_T2", "homes": 100},
+    "OTKc_PV": {"bus": "OTKc_0.415", "load": "OTKc", "pline": "OTKc_pline_OTKc_0.415", "tx": "OTK_T3", "homes": 100},
+    "OTS_PV":  {"bus": "OTS_0.415",  "load": "OTS",  "pline": "OTS_pline_OTS_0.415",  "tx": "OTS_T1",  "homes": 1},
+    "RGUa_PV": {"bus": "RGUa_0.415", "load": "RGUa", "pline": "RGUa_pline_RGUa_0.415", "tx": "RGU_T1", "homes": 100},
+    "RGUb_PV": {"bus": "RGUb_0.415", "load": "RGUb", "pline": "RGUb_pline_RGUb_0.415", "tx": "RGU_T2", "homes": 100},
+    "TRE_PV":  {"bus": "TRE_0.415",  "load": "TRE",  "pline": "TRE_pline_TRE_0.415",  "tx": "TRE_T1",  "homes": 100},
+    "WTVa_PV": {"bus": "WTVa_0.415", "load": "WTVa", "pline": "WTVa_pline_WTVa_0.415", "tx": "WTV_T1", "homes": 100},
+    "WTVb_PV": {"bus": "WTVb_0.415", "load": "WTVb", "pline": "WTVb_pline_WTVb_0.415", "tx": "WTV_T2", "homes": 100},
+    "WTVc_PV": {"bus": "WTVc_0.415", "load": "WTVc", "pline": "WTVc_pline_WTVc_0.415", "tx": "WTV_T3", "homes": 100},
+}
 
-# 3.3 Apply sliders, return any missing PV keys
-def set_pv_penetrations(app, sliders):
-    pv_objs, missing = get_pv_objects(app)                                  # resolve pv_key → PF object; also gather list of missing keys
-    for key, percent in sliders.items():                                    # iterate each GUI slider input
-        pv = pv_objs.get(key)                                               # fetch the corresponding PF object (if found)
-        if not pv:                                                          # skip keys that weren’t resolved (will be in 'missing')
+
+#====================================================================================================
+# 2.0 ✅ Connect, Activate Project & Study Case ✅ Working Perfectly, Don't fucking touch
+#====================================================================================================
+
+
+#2.1 Connect to PowerFactory
+print("2.1.0 🔌    Connecting to PowerFactory…")
+app = pf.GetApplication()
+if not app:
+    print("2.1.0 ❌ Could not connect to PowerFactory."); sys.exit(1)
+print("2.1.0 ✅     Connected.")
+print()
+
+
+#2.2 Activate project
+print(f"2.2.0 📂    Activating project: {PROJECT_NAME}")
+if app.ActivateProject(PROJECT_NAME) != 0:
+    print(f"2.2.0 ❌ Could not activate project '{PROJECT_NAME}'."); sys.exit(1)
+print(f"2.2.0 ✅     Project activated: {PROJECT_NAME}")
+print()
+
+
+# 2.3 Activate study case
+print(f"2.3.0 🔎    Looking for study case: {STUDY_CASE_NAME}")
+study_folder = app.GetProjectFolder("study")
+active_case = None
+for case in study_folder.GetContents("*.IntCase", 1):
+    if case.loc_name == STUDY_CASE_NAME:
+        case.Activate()
+        active_case = case
+        break
+if not active_case:
+    print(f"2.3.0 ❌ Study case '{STUDY_CASE_NAME}' not found."); sys.exit(1)
+print(f"2.3.0 ✅     Study Case activated: {active_case.loc_name}")
+print()
+
+
+# 2.4.0 ▶️    Refresh PV inverter overrides from model
+def refresh_pv_overrides_from_model(app):
+    print("2.4.0 ▶️    Read current PV inverter counts.")
+    found = 0
+    for code in PV_LIST:
+        for p in (app.GetCalcRelevantObjects(f"{code}*.ElmPvsys") or []):
+            PV_INV_OVERRIDES[p.loc_name] = int(getattr(p, "ngnum", 0) or 0)
+            found += 1
+            if PRINT_PV_OVERRIDES:
+                print(f"2.4.1 ✅     {p.loc_name}: ngnum={PV_INV_OVERRIDES[p.loc_name]}")
+    print(f"2.4.0 ✅     Refreshed {found} PV entries.")
+    print()
+refresh_pv_overrides_from_model(app)
+
+
+# 2.5.0 get_inverter_counts
+def get_inverter_counts():
+    global RESULTS
+    RESULTS.setdefault("pv_meta", {})
+    pv_meta = RESULTS["pv_meta"]
+    pv_meta.clear()
+    for pv_key, meta in PV_CONFIG.items():
+        homes = int(meta.get("homes", 0))
+        pv_meta[pv_key] = {"inverters": homes}
+        print(f"[otaki_sim] {pv_key}: inverters={homes}")
+    return pv_meta
+
+
+#====================================================================================================
+# 3.0 ✅ Quasi‑Dynamic Simulation Setup
+#====================================================================================================
+
+
+# 3.2 Results file setup ----------------------------------------------------------------------------
+def prepare_quasi_dynamic(app, monitored_vars,
+                          step_size=QDS_STEP_SIZE,
+                          step_unit=QDS_STEP_UNIT,
+                          period=QDS_CALC_PERIOD):
+    print("3.1.0 ▶️    Results Setup Begin.")
+    qds = app.GetFromStudyCase("ComStatsim")
+    if not qds:
+        raise RuntimeError("3.1.0 ❌ [Results Setup] ComStatsim not found.")
+    res = qds.results
+    if not res:
+        raise RuntimeError("3.1.0 ❌ [Results Setup] QDS results object missing.")
+    res.Clear()
+    print("3.1.0 ✅     Results Setup ready.")
+    print()
+
+    print("3.1.2 ▶️    Adding Variables to Check.")
+    for sel, var_list in monitored_vars.items():
+        elems = app.GetCalcRelevantObjects(sel) or []
+        for e in elems:
+            res.AddVars(e, *var_list)
+            if PRINT_VARIABLE_CHECKS:
+                print(f"3.1.2 ➕    Checking Variables {e.loc_name}: {var_list}")
+    print("3.1.2 ✅     Variable Checking Done.")
+    print()
+
+    print("3.1.3 ▶️    Configure Quasi-Dynamic Simulation Timing.")
+    qds.stepSize   = step_size
+    qds.stepUnit   = step_unit
+    qds.calcPeriod = period
+    print(f"3.1.3 ✅     Timing: period={period}, step={step_size}, unit={step_unit}")
+
+    print("3.1.4 ✅     Quasi-Dynamic Simulation Ready to Run.")
+    print()
+    return res, qds
+
+
+# 3.3 Execute QDS — runs the quasi‑dynamic simulation ---------------------------------------------
+def run_quasi_dynamic(qds):
+    print("3.2.0 ▶️    Quasi-Dynamic Simulation Running…")
+    ok = (qds.Execute() == 0)
+    print("3.2.0 ✅     Quasi-Dynamic Simulation Finished. --------------------- " if ok else 
+          "3.2.0 ❌ Quasi-Dynamic Simulation Failed.")
+    print()
+    return ok
+
+
+# 3.4 Read results — loads time series for one element/variable ------------------------------------
+def get_dynamic_results(app, res, elm_selector, var_name, verbose=True):
+    elems = app.GetCalcRelevantObjects(elm_selector) or []
+    name = elems[0].loc_name if elems else elm_selector
+    if verbose:
+        print(f"3.3.0 ▶️    Results For {name}")
+    if not elems:
+        if verbose: print(f"3.3.0 ⚠️ [Read Results] Element not found for '{elm_selector}' ({var_name}).")
+        return [], []
+    elm = elems[0]
+    app.ResLoadData(res)
+    col = app.ResGetIndex(res, elm, var_name)
+    if col < 0:
+        if verbose: print(f"3.3.0 ⚠️ [Read Results] Var '{var_name}' not in results for {name}.")
+        return [], []
+    n = app.ResGetValueCount(res, 0)
+    if verbose:
+        print(f"3.3.0 ℹ️ Reading Results For {name}, Variable={var_name}, Rows={n}")
+    t, v = [], []
+    for i in range(n):
+        t.append(app.ResGetData(res, i, -1)[1])
+        v.append(app.ResGetData(res, i, col)[1])
+    if verbose:
+        print(f"3.3.0 ✅     Results For {name} Extracted.")
+    return t, v
+
+
+# 3.5 Apply PV inverter overrides (set ElmPvsys.ngnum)
+def apply_pv_inverter_overrides(app, overrides):
+    print("3.4.0 ▶️    Apply PV Inverter Overrides.")
+    if not overrides:
+        print("3.4.0 ✅     No overrides provided."); return
+    for code, count in overrides.items():
+        pvs = app.GetCalcRelevantObjects(f"{code}*.ElmPvsys") or []
+        if not pvs:
+            print(f"3.4.0 ⚠️    No PV matched '{code}'"); continue
+        for p in pvs:
+            old = getattr(p, "ngnum", None)
+            try:
+                p.ngnum = int(count)
+                if PRINT_PV_OVERRIDES:
+                    print(f"3.4.4 ✅     {p.loc_name}: ngnum {old} → {p.ngnum}")
+            except Exception as e:
+                print(f"3.4.0 ❌    {p.loc_name}: failed to set ngnum: {e}")
+    print("3.4.0 ✅     Overrides applied.")
+    print()
+
+
+#====================================================================================================
+# 4.0 ✅ Quasi-Dynamic Simulation Core (Wrapped for GUI Use)
+#====================================================================================================
+
+
+# 4.1 Build full monitored variable dict -----------------------------------------------------------
+def build_monitored_dict():
+    print("4.0.0 ▶️    Quasi-Dynamic Simulation Setup.")
+    bus_selectors  = {f"{bus}.ElmTerm": ["m:u1"] for bus in BUS_LIST}             # p.u. voltage
+    load_selectors = {f"{code}*.ElmLod": ["m:P:bus1"] for code in LOAD_LIST}      # kW demand
+    pv_selectors   = {f"{code}*.ElmPvsys": ["m:Psum:bus1"] for code in PV_LIST}   # PV output
+    tx_selectors   = {f"{code}*.ElmTr2": ["m:loading:bus1"] for code in TX_LIST}  # % loading
+    line_selectors = {f"{name}.ElmLne":   ["m:loading:bus1"] for name in LINE_LIST}  # % loading
+
+    monitored = {}
+    monitored.update(bus_selectors)
+    monitored.update(load_selectors)
+    monitored.update(pv_selectors)
+    monitored.update(tx_selectors)
+    monitored.update(line_selectors)
+
+    MONITORED[:] = [(k, v) for k, v in monitored.items()]                         # update global list for GUI access
+    print(f"4.0.3 ℹ️    Register Monitors {len(MONITORED)} entries. ------------")
+    print()
+    return monitored
+
+
+# 4.2 Extract all results (same as before) -----------------------------------------------
+def extract_qds_results(app, res):
+    # 4.2 BUS Hourly p.u. voltage (24hrs)-----------------------------------------------------------
+    print("4.2.0 ▶️     Hourly p.u. Voltages Begin.")
+    for bus in BUS_LIST:
+        sel = f"{bus}.ElmTerm"
+        t, u = get_dynamic_results(app, res, sel, "m:u1", verbose=PRINT_BUS_HOURLY)
+        if not u:
+            print(f"4.2.0 ⚠️ No voltage data for {bus}")
             continue
-        typ = PV_CONFIG.get(key, {}).get("type", "res")                     # look up configured site type; default to residential
-        if typ == "res":                                                    # residential → use inverter count via npar
-            _apply_residential_pv(pv, percent)
-        elif typ == "com":                                                  # commercial → scale up to COM_MAX_KW by percent
-            _apply_fixed_kw(pv, COM_MAX_KW * (max(0.0, 
-            min(100.0, percent)) / 100.0))
-        elif typ == "ind":                                                  # industrial → scale up to IND_MAX_KW by percent
-            _apply_fixed_kw(pv, IND_MAX_KW * (max(0.0, 
-            min(100.0, percent)) / 100.0))
-        elif typ == "school":                                               # school → scale up to SCH_MAX_KW by percent
-            _apply_fixed_kw(pv, SCH_MAX_KW * (max(0.0, 
-            min(100.0, percent)) / 100.0))
-    return missing                                                          # inform caller which pv_keys didn’t map to PF objects
+        RESULTS["bus"][bus] = {"t": t[:24], "u_pu": u[:24]}
+        if PRINT_BUS_HOURLY:
+            for hr in range(min(24, len(u))):
+                print(f"{hr:02d} {bus} = {u[hr]:.4f} p.u")
+    print("4.2.0 ✅     Hourly p.u. Voltages Done. ------------------------------")
+    print()
 
 
-
-# =====================================================================================================================================================
-# =====================================================================================================================================================
-# 4.0 ---------- Extraction utilities (series, min/max, energy) ----------  # helpers for processing time-series from PF
-# =====================================================================================================================================================
-# =====================================================================================================================================================
-
-# 4.1 series_minmax: Given a [(t, u), ...] series, return dict with min/max values and their timestamps
-def series_minmax(series):
-    if not series:                                                          # empty / None → no data to process
-        return None                                                         # signal absence of values
-    vmin = min(series, key=lambda x: x[1])                                  # find the (t, u) pair with the smallest u
-    vmax = max(series, key=lambda x: x[1])                                  # find the (t, u) pair with the largest u
-    return {"u_min": vmin[1], "t_min_s": vmin[0], 
-    "u_max": vmax[1], "t_max_s": vmax[0]}                                   # package results with value + time (seconds)
-
-# 4.2 energy_kwh: Trapezoidal integrate a power series [(t, kW)] to get energy in kWh
-def energy_kwh(series_kw):
-    if not series_kw or len(series_kw) < 2:                                 # need at least two points to integrate
-        return 0.0                                                          # no area under a single point
-    e = 0.0                                                                 # accumulator for energy (kWh)
-    for (t0, p0), (t1, p1) in zip(series_kw, series_kw[1:]):                # iterate consecutive point pairs
-        dt_h = max(0.0, (t1 - t0) / 3600.0)                                 # time step in hours (guard against negative/unsorted)
-        e += 0.5 * (p0 + p1) * dt_h                                         # trapezoid area: average power × duration
-    return e                                                                # total energy in kWh
-
-# 4.3 Convert MW series to kW if magnitudes look too small to be kW
-def maybe_MW_to_kW(vals):                                                   # If median magnitude < 5, assume MW and convert to kW
-    if not vals:                                                            # empty input → nothing to do
-        return vals                                                         # return as-is
-    mags = sorted(abs(v) for _, v in vals)                                  # absolute magnitudes of the values for robust median
-    med = mags[len(mags) // 2]                                              # median magnitude
-    if med < 5.0:                                                           # typical kW medians are >> 5; <5 suggests MW scale
-        return [(t, v * 1000.0) for t, v in vals]                           # convert MW → kW by ×1000
-    return vals                                                             # otherwise keep original units
+# 4.2.1 Bus 24hr Min/Max Voltage p.u-------------------------------------------------------------
+    print("4.2.1 ▶️    Bus 24hr Min/Max p.u Begin.")
+    for bus in BUS_LIST:
+        rec = RESULTS["bus"].get(bus)
+        if not rec:
+            print(f"4.2.1 ⚠️ No data for {bus}"); continue
+        u = rec.get("u_pu", [])[:24]
+        if not u:
+            print(f"4.2.1 ⚠️ Empty voltage list for {bus}"); continue
+        u_min = min(u); h_min = u.index(u_min)
+        u_max = max(u); h_max = u.index(u_max)
+        rec.update({
+            "u_pu_min": u_min, "u_pu_min_hour": h_min,
+            "u_pu_max": u_max, "u_pu_max_hour": h_max
+        })
+        if PRINT_BUS_MIN_MAX:
+            print(f"4.2.1 📌 {bus} min={u_min:.4f} @ {h_min:02d}h, max={u_max:.4f} @ {h_max:02d}h")
+    print("4.2.1 ✅     Bus 24hr Min/Max p.u Done. -------------------------------")
+    print()
 
 
-# 4.4 Build a list of second-based timestamps for a 24 h day (inclusive end)
-def _times_24h(dt_s: float = 3600.0):
-    """
-    Return [0, dt_s, 2*dt_s, ..., 24*3600] in seconds.
-    Snapshot mode usually uses 3600 s (hourly), so callers often slice off the last item.
-    """
-    total = int(24 * 3600)                                                  # total simulation span in seconds (24 hours)
-    steps = int(round(total / dt_s))                                        # number of uniform steps across the day
-    return [i * dt_s for i in range(steps + 1)]                             # include the final 24h mark so _times_24h()[:-1] → 0..23 hours
+# 4.3 LOAD Hourly demand (24hrs)---------------------------------------------------------------
+    print("4.3.0 ▶️   Hourly Load Demand Begin.")
+    for load in LOAD_LIST:
+        sel = f"{load}*.ElmLod"
+        loads = app.GetCalcRelevantObjects(sel) or []
+        if not loads:
+            print(f"4.3.0 ⚠️ No loads matched '{load}'"); continue
+        for ld in loads:
+            tP, P = get_dynamic_results(app, res, ld.loc_name + ".ElmLod", "m:P:bus1", verbose=PRINT_LOAD_HOURLY)
+            if not P:
+                print(f"4.3.0 ⚠️ No demand data for {ld.loc_name}"); continue
+            RESULTS["load"][ld.loc_name] = {"t": tP[:24], "P_W": P[:24]}
+            if PRINT_LOAD_HOURLY:
+                for hr in range(min(24, len(P))):
+                    print(f"{hr:02d} {ld.loc_name} = {P[hr]:.4f} W")
+                print()
+    print("4.3.0 ✅     Hourly Load Demand Done. ---------------------------------")
+    print()
 
 
-# 4.5 Smooth daylight scalar (0..1) peaking near 12:00
-def _gaussian_pv_scaler(hour: int) -> float:
-    """
-    Simple bell-shaped daylight multiplier. ~0 at night, ~1 at noon.
-    Non-zero roughly 06:00–18:00 with a peak at ~12:00.
-    """
-    if hour < 6 or hour > 18:                                               # outside daylight window → zero PV
-        return 0.0                                                          # return no generation
-    sigma = 3.5                                                             # width of the bell (larger = flatter midday shoulder)
-    x = (hour - 12.0) / sigma                                               # normalised distance from noon
-    return float(math.exp(-0.5 * x * x))                                    # Gaussian curve value in [0,1]
+# 4.4 PV Hourly Production (24hrs)---------------------------------------------------------------
+    print("4.4.0 ▶️   Hourly PV Array Production Begin.")
+    for pv in PV_LIST:
+        pvs = app.GetCalcRelevantObjects(f"{pv}*.ElmPvsys") or []
+        if not pvs:
+            print(f"4.4.0 ⚠️ No PV objects found for '{pv}'"); continue
+        for p in pvs:
+            sel = f"{p.loc_name}.ElmPvsys"
+            tP, P = get_dynamic_results(app, res, sel, "m:Psum:bus1", verbose=PRINT_PV_HOURLY)
+            if not P:
+                print(f"4.4.0 ⚠️ No production data for {p.loc_name}"); continue
+            RESULTS["pv"][p.loc_name] = {"t": tP[:24], "P_W": P[:24]}
+            if PRINT_PV_HOURLY:
+                for hr in range(min(24, len(P))):
+                    print(f"{hr:02d} {p.loc_name} = {P[hr]/1000:.2f} kW")
+                print()
+    print("4.4.0 ✅     Hourly PV Production Done. --------------------------------")
+    print()
 
 
-# 4.6 Locate the Load Flow command (ComLdf) in the active Study Case
-def _get_ldf(app):
-    """
-    Try common ways to obtain a ComLdf object. Raise if none is found.
-    """
-    ldf = None                                                              # will hold the found ComLdf command 
-    try:                                                                    # Direct fetch from the Study Case (works when there is a single ComLdf)
-        ldf = app.GetFromStudyCase("ComLdf")                                # ask the study case for a ComLdf object
-    except Exception:
-        ldf = None                                                          # ignore and try fallbacks
-    if not ldf:                                                             # Fallback: search calculation-relevant objects by class pattern
-        try:
-            candidates = app.GetCalcRelevantObjects("*.ComLdf") or []       # look up any load-flow commands in scope
-            if candidates:                                                  # if at least one exists
-                ldf = candidates[0]                                         # pick the first (common single-command case)
-        except Exception:
-            ldf = None                                                      # still nothing; keep going
-
-    if not ldf:                                                             # if no command was found at all
-        raise RuntimeError("No Load Flow command (ComLdf) " \
-        "found in the active Study Case.")                                  # bail with a clear message
-    return ldf                                                              # return the command object ready to Execute()
-
-
-# 4.7 Find and lightly configure a QDS command (ComInc/ComSim)
-def _configure_qds(app):
-    """
-    Return a quasi-dynamic simulation command object if present.
-    Tries ComInc first, then ComSim. Returns None if neither is available.
-    """
-    qds = None                                                              # will hold whichever QDS command we can find
-
-    # Try incremental simulation command first (ComInc)
-    try:
-        qds = app.GetFromStudyCase("ComInc")                                # ask the study case for a ComInc
-    except Exception:
-        qds = None                                                          # ignore and try other options
-
-    # Fallback: general simulation command (ComSim)
-    if not qds:
-        try:
-            qds = app.GetFromStudyCase("ComSim")                            # ask the study case for a ComSim
-        except Exception:
-            qds = None                                                      # still nothing; try search
-
-    # Last resort: search by class pattern amongst calc-relevant objects
-    if not qds:
-        try:
-            for cls in ("*.ComInc", "*.ComSim"):                            # check both common QDS command classes
-                objs = app.GetCalcRelevantObjects(cls) or []                # any instances available?
-                if objs:
-                    qds = objs[0]                                           # pick the first one found
-                    break                                                   # stop searching once we’ve got one
-        except Exception:
-            qds = None                                                      # swallow and leave as None
-
-    # Light-touch configuration; not all variants expose these attributes
-    if qds:
-        for attr, val in (("tstart", QDS_TSTART_S),                         # start time (seconds since midnight)
-                          ("tstop",  QDS_TSTOP_S),                          # stop time (seconds since midnight)
-                          ("dtgrid", QDS_DT_S)):                            # time step (seconds)
-            try:
-                setattr(qds, attr, val)                                     # set the attribute if it exists on this command
-            except Exception:
-                pass                                                        # safe to ignore — different templates expose different fields
-
-    return qds                                                              # may be None; caller decides on snapshot fallback
-
-
-
-# =====================================================================================================================================================
-# =====================================================================================================================================================
-# 5.0 ---------- Snapshot sweep (Fallback if QDS is playing silly buggers) 
-# =====================================================================================================================================================
-# =====================================================================================================================================================
-
-
-# 5.1 Run 24 hourly sim, gather voltages/loads/PV and store values
-def run_snapshot_24h(app):
-    """
-    Runs 24 hourly load flows and collects: bus pu, PV kW, loads kW, line/trafo loading %.
-    Uses a simple PV shape multiplier to emulate time-of-day if model lacks time-series.
-    """
-    ldf     = _get_ldf(app)                                                 # obtain a Load Flow command object for executing snapshots
-    buses   = get_bus_objects(app)                                          # map of bus name → terminal object for voltage reads
-    pv_objs, _ = get_pv_objects(app)                                        # pv_key → PV object (ignore missing list here)
-    net     = discover_network_elements(app)                                # discover lines/transformers/loads for loading & totals
-
-# 5.1.1 Storage for time-series that builds as sweep hours
-    bus_u      = {b: [] for b in buses}                                     # bus name → list of (t, pu) voltage tuples
-    pv_p_kw    = {k: [] for k in pv_objs}                                   # pv_key → list of (t, kW) output tuples
-    load_kw    = []                                                         # total load time-series (t, kW) across all loads
-    line_load  = {ln.loc_name: [] for ln in net["lines"]}                   # line name → list of (t, %) loading tuples
-    trafo_load = {tr.loc_name: [] for tr in net["trafos"]}                  # trafo name → list of (t, %) loading tuples
-
-    times = _times_24h()[:-1]                                               # 0..23 hours in seconds (exclude 24:00 end)
-    for idx, t in enumerate(times):                                         # iterate each hourly timestamp
-        hour = t // 3600                                                    # integer hour index (0..23)
-
-# 5.1.2 If model lacks PV dynamics, emulate a day profile with a smooth multiplier
-        day_mult = _gaussian_pv_scaler(hour)                                # scalar 0..1 shaping factor centred around midday
-
-# 5.1.3 Execute one snapshot load flow for this hour
-        ldf.Execute()                                                       # perform the network solution for current state  # :contentReference[oaicite:17]{index=17}
-
-# 5.1.4 Buses: capture voltage in per-unit
-        for name, term in buses.items():                                    # loop over every calc-relevant bus/terminal
-            try:
-                u = term.GetAttribute("m:u")                                # read measured voltage (pu) attribute
-            except Exception:
-                u = None                                                    # if attribute missing/unavailable, record nothing
-            if u is not None:
-                bus_u[name].append((t, float(u)))                           # append (time, pu) to the bus’s series
-
-# 5.1.5 PV: capture active power (kW or MW depending on template), apply day profile for snapshot mode
-        for key, pv in pv_objs.items():                                     # iterate each PV object we resolved
-            p = pv.GetAttribute("m:Psum")                                   # try measured total active power first
-            if p is None:
-                p = pv.GetAttribute("pgini")                                # fallback to initial setpoint if measured value absent
-            val = float(p) if p is not None else 0.0                        # ensure a numeric value
-            pv_p_kw[key].append((t, val * day_mult))                        # apply daylight multiplier and store (t, value)
-
-# 5.1.6 Loads: sum all ElmLod active powers
-        tot = 0.0                                                           # accumulator for total load
-        for ld in net["loads"]:                                             # iterate each load element
-            p = ld.GetAttribute("m:Psum")                                   # measured active power of the load
-            if p is None:
-                continue                                                    # skip if attribute not available
-            tot += float(p)                                                 # add to the running total
-        load_kw.append((t, tot))                                            # store (t, total_kW_or_MW_depends)
-
-# 5.1.7 Assets: capture line/trafo loading percentages
-        for ln in net["lines"]:                                             # for each line
-            v = ln.GetAttribute("loading")                                  # loading percentage attribute
-            if v is not None:
-                line_load[ln.loc_name].append((t, float(v)))                # store (t, %)
-        for tr in net["trafos"]:                                            # for each transformer
-            v = tr.GetAttribute("loading")                                  # loading percentage attribute
-            if v is not None:
-                trafo_load[tr.loc_name].append((t, float(v)))               # store (t, %)
-
-# 5.1.8 Normalise PV/load units to kW (heuristic converter handles MW→kW)
-    for k, s in pv_p_kw.items():                                            # per PV series
-        pv_p_kw[k] = maybe_MW_to_kW(s)                                      # convert if series appears to be in MW
-    load_kw = maybe_MW_to_kW(load_kw)                                       # convert total load series if needed
-
-# 5.1.9 Assemble the structured report payload
-    report = {
-        "limits": {},                                                       # bus voltage min/max + OK flag per GUI suburb bus
-        "pv": {},                                                           # per-PV energy and peak information + series
-        "lines": {},                                                        # per-line maximum loading %
-        "trafos": {},                                                       # per-trafo maximum loading %
-        "load": {},                                                         # total load series + energy
-        "meta": {"mode": "snapshot", "dt_s": 3600.0}                        # metadata: mode and timestep used
-    }
-
-# 5.1.10 Compute bus min/max/OK flags (per GUI suburb bus)
-    for key, meta in PV_CONFIG.items():                                     # iterate GUI-configured suburbs
-        bus = meta["bus"]                                                   # the associated PF bus name
-        s = bus_u.get(bus, [])                                              # fetch that bus’s voltage series
-        mm = series_minmax(s)                                               # derive min/max and times
-        if mm:
-            mm["ok"] = (mm["u_min"] >= V_OK_MIN and 
-            mm["u_max"] <= V_OK_MAX)                                        # within limits → OK True/False
-            report["limits"][bus] = mm                                      # store under the bus name
-
-# 5.1.11 PV energy and peaks per pv_key
-    for key, s in pv_p_kw.items():                                          # per PV series
-        e = energy_kwh(s)                                                   # integrate to kWh over the day
-        pmax = max((v for _, v in s), default=0.0)                          # maximum instantaneous power across the series
-        report["pv"][key] = {"series_kW": s, "e_kWh": e, "p_kw_max": pmax}  # package PV metrics
-
-# 5.1.12 Line/trafo worst-case loading percentages
-    for name, s in line_load.items():                                       # per line series
-        if s:
-            report["lines"][name] = {"loading_max_pct": 
-                                     max(v for _, v in s)}                  # store the maximum observed %
-    for name, s in trafo_load.items():                                      # per transformer series
-        if s:
-            report["trafos"][name] = {"loading_max_pct": 
-                                      max(v for _, v in s)}                 # store the maximum observed %
-
-# 5.1.13 Total load series & daily energy
-    report["load"]["total_series_kW"] = load_kw                             # the unified total-load time-series (kW)
-    report["load"]["total_e_kWh"] = energy_kwh(load_kw)                     # integrated daily energy (kWh)
-
-    return report                                                           # hand back the complete snapshot-mode results bundle
-
-
-# =====================================================================================================================================================
-# =====================================================================================================================================================
-# 6.0 ---------- QDS path (if available) ----------  # attempt a quasi-dynamic simulation; fall back to snapshot post-processing
-# =====================================================================================================================================================
-# =====================================================================================================================================================
-
-# 6.1 run_qds_24h: Configure and run a 24-hour QDS sweep; if unsupported, raise so caller can use snapshot mode
-def run_qds_24h(app):
-    """
-    Attempt a quasi-dynamic 24h sweep. If no suitable object is present or ElmRes
-    writes no rows, raise to allow fallback to snapshot.
-    """
-# 6.1.1 Obtain a QDS command object (project dependent) or fail fast
-    qds = _configure_qds(app)                                               # helper should locate/prepare ComInc/ComSim (or equivalent) for QDS
-    if not qds:
-        raise RuntimeError("No QDS command object found (ComInc/ComSim).")  # let the caller decide to fall back
-
-# 6.1.2 Set the time grid on the QDS object where supported
-    for attr, val in (("tstart", QDS_TSTART_S), ("tstop", QDS_TSTOP_S), ("dtgrid", QDS_DT_S)):
-        try:
-            setattr(qds, attr, val)                                         # not all QDS variants expose these; ignore if they don’t
-        except Exception:
-            pass                                                            # keep going even if some attributes aren’t available
-
-# 6.1.3 Execute the QDS sweep (object type depends on your PF setup)
-    qds.Execute()                                                           # Run the sweep (object class depends on your setup)  # :contentReference[oaicite:18]{index=18}
-
-# 6.1.4 Post-processing: reuse robust snapshot readers to assemble the same report structure
-    # After QDS, read results directly from element attributes at final time,
-    # and also reconstruct time series via repeated Read of ElmRes if configured.
-    # Because QDS wiring varies widely, we’ll use the robust snapshot readers
-    # executed *after* QDS to collect the same signals across the 24h times.
-    return run_snapshot_24h(app)                                            # leverage existing logic to build the 'report' dict
-
-
-# =====================================================================================================================================================
-# =====================================================================================================================================================
-# 7.0 ---------- Public entry point: set sliders, run, export PDF ----------  # main API used by the GUI
-# =====================================================================================================================================================
-# =====================================================================================================================================================
-
-
-# 7.1 Apply GUI slider values in PF, run 24 h analysis, write JSON/PDF, return results dict
-def set_penetrations_and_run(sliders, pdf_path=PDF_DEFAULT):
-    """
-    Main entry for GUI:
-      - set PV penetrations according to sliders {pv_key: percent}
-      - run 24-hour analysis (QDS first; snapshot fallback)
-      - return rich result dict (and write a PDF report)
-    """
-    app = connect_and_activate()                                            # ensure PowerFactory is running with a project open; get Application handle
-    _ = get_studycase(app)                                                  # verify a Study Case is active (raises if not); value unused, check only
-    missing = set_pv_penetrations(app, sliders)                             # push slider percentages into PF objects; returns any pv_keys not found
-
-    try:                                                                    # attempt preferred simulation path first
-        if USE_QDS_FIRST:                                                   # if configured to use quasi-dynamic simulation
-            results = run_qds_24h(app)                                      # run QDS for 24 h and post-process
-        else:                                                               # otherwise
-            results = run_snapshot_24h(app)                                 # do robust snapshot sweep instead
-    except Exception:                                                       # if QDS setup fails or execution errors,
-        results = run_snapshot_24h(app)                                     # fall back to snapshot mode to keep things resilient
-
-    results["missing_pv"] = list(missing)                                   # surface any PV objects not found so the GUI can warn the user
-
-# 7.1.1 Build legacy bus-keyed entries: { "<bus>": {"u_min":..., "u_max":..., "ok":...}, ... }
-    legacy = {}                                                             # temporary dict for legacy keys
-    for key, meta in PV_CONFIG.items():                                     # iterate configured GUI suburbs
-        bus = meta["bus"]                                                   # associated PF bus name
-        lim = results.get("limits", {}).get(bus)                            # look up computed limits for that bus
-        if lim:                                                             # if we have limits, copy out the essentials
-            legacy[bus] = {
-                "u_min": lim.get("u_min"),
-                "u_max": lim.get("u_max"),
-                "ok":    lim.get("ok", True),
+# 4.4.1 PV Nameplate & Inverters
+    print("4.4.1 ▶️    PV Variables.")
+    if "pv_meta" not in RESULTS: RESULTS["pv_meta"] = {}
+    for code in PV_LIST:
+        pvs = app.GetCalcRelevantObjects(f"{code}*.ElmPvsys") or []
+        if not pvs:
+            print(f"4.4.1 ⚠️   No PV Found '{code}'"); continue
+        for p in pvs:
+            inv_objs = app.GetCalcRelevantObjects(p.loc_name + ".ElmInv") or []
+            inv_count = len(inv_objs) if inv_objs else int(getattr(p, "ngnum", 0) or 0)
+            par_mods = int(getattr(p, "npnum", 0) or 0)
+            rating_kw_calc = (inv_count * par_mods * float(PANEL_WATT)) / 1000.0
+            RESULTS["pv_meta"][p.loc_name] = {
+                "rating_kW_calc": rating_kw_calc,
+                "inverters": inv_count,
+                "panels_per_inverter": par_mods,
             }
-
-# 7.1.2 Merge legacy keys into top-level results so old GUI code can still iterate results.items()
-    results.update(legacy)                                                  # adds/overwrites bus-named keys at the root of the dict
-
-# 7.1.3 Always include a JSON copy beside the PDF for programmatic reuse
-    try:
-        with open(os.path.splitext(pdf_path)[0] + ".json", 
-                  "w", encoding="utf-8") as f:                              # write results next to the PDF
-            json.dump(results, f, indent=2)                                 # pretty-print JSON for easy inspection
-    except Exception:                                                       # file I/O failure shouldn’t crash the run
-        pass
-
-# 7.1.4 Export PDF report (best-effort; warn to console if it fails)
-    try:
-        export_report_pdf(results, pdf_path)                                # generate a human-readable PDF summary
-    except Exception as e:
-        # don't crash GUI if PDF export fails
-        print(f"[WARN] PDF export failed: {e}")                             # log a warning; GUI remains responsive
-
-# 7.1.5 Return the full results dict (contains 'limits', 'pv', 'lines', 'trafos', 'load', plus legacy bus keys)
-    return results                                                          # GUI consumes this to update result labels/graphs
+            if PRINT_PV_META:
+                prefix = f"4.4.1 ✅     {p.loc_name}: "
+                pad = " " * len(prefix)
+                print(f"{prefix}Nameplate Rating = {rating_kw_calc:.2f} kW,")
+                print(f"{pad} Inverters in Parallel = {inv_count},")
+                print(f"{pad} Panels per inverter = {par_mods}")
+    print("4.4.1 ✅     PV Nameplate & Inverters Done. ----------------------------")
+    print()
 
 
-# $$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$
-# =====================================================================================================================================================
-# =====================================================================================================================================================
-# 8.0 ---------- PDF export (matplotlib PdfPages) ----------  # generate a multi-page A4 report with tables and charts
-# =====================================================================================================================================================
-# =====================================================================================================================================================
-# $$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$
+# 4.5 TRANSFORMER Loading ------------------------------------------------------------------------
+    print("4.5.0 ▶️   Hourly Tx Loading Begin.")
+    for tx in TX_LIST:
+        tx_objs = app.GetCalcRelevantObjects(f"{tx}*.ElmTr2") or []
+        if not tx_objs:
+            print(f"4.5.0 ⚠️ No Transformer Found '{tx}'"); continue
+        for t in tx_objs:
+            tP, P = get_dynamic_results(app, res, t.loc_name + ".ElmTr2", "m:loading:bus1", verbose=PRINT_TX_HOURLY)
+            if not P:
+                print(f"4.5.0 ⚠️ No Loading Data for {t.loc_name}"); continue
+            RESULTS["tx"][t.loc_name] = {"t": tP[:24], "loading_pct": P[:24]}
+            if PRINT_TX_HOURLY:
+                for hr in range(min(24, len(P))):
+                    print(f"{hr:02d} {t.loc_name} = {P[hr]:.2f} %")
+                print()
+    print("4.5.0 ✅     Hourly Tx Loading Done. ------------------------------------")
+    print()
 
 
-# 8.1 export_report_pdf: Build and write the PDF report using matplotlib’s PdfPages
-def export_report_pdf(results, pdf_path):
+# 4.6 LINE Loading --------------------------------------------------------------------------------
+    print("4.6.0 ▶️    Hourly Line Loading Begin.")
+    if "line" not in RESULTS: RESULTS["line"] = {}
+    for line in LINE_LIST:
+        lines = app.GetCalcRelevantObjects(f"{line}.ElmLne") or []
+        if not lines:
+            print(f"4.6.0 ⚠️ No Line Found '{line}'"); continue
+        for ln in lines:
+            tL, L = get_dynamic_results(app, res, ln.loc_name + ".ElmLne", "m:loading:bus1", verbose=PRINT_LINE_HOURLY)
+            if not L:
+                print(f"4.6.0 ⚠️ No Loading Data for Line {ln.loc_name}"); continue
+            RESULTS["line"][ln.loc_name] = {"t": tL[:24], "loading_pct": L[:24]}
+            if PRINT_LINE_HOURLY:
+                for hr in range(min(24, len(L))):
+                    print(f"{hr:02d} {ln.loc_name} Loading = {L[hr]:.2f} %")
+                print()
+    print("4.6.0 ✅     Hourly Line Loading Done. ----------------------------------")
+    print()
+
+
+# 4.7 BUILD ASSOCIATIONS --------------------------------------------------------------------------
+    print("4.7.0 ▶️    Build Associations Begin.")
+    ASSOC.clear()
+    all_pv  = app.GetCalcRelevantObjects("*.ElmPvsys") or []
+    all_tx2 = app.GetCalcRelevantObjects("*.ElmTr2")   or []
+    all_ln  = app.GetCalcRelevantObjects("*.ElmLne")   or []
+
+    for code in LOAD_LIST:
+        loads = app.GetCalcRelevantObjects(f"{code}*.ElmLod") or []
+        for ld in loads:
+            bus_term = getattr(ld, "bus1", None)
+            bus_name = getattr(bus_term, "loc_name", None) if bus_term else None
+
+            pv_names = [pv.loc_name for pv in all_pv
+                        if getattr(pv, "bus1", None) is bus_term]
+
+            tx_names = [tx.loc_name for tx in all_tx2
+                        if (getattr(tx, "buslv", None) is bus_term)
+                        or (getattr(tx, "bus1", None) is bus_term)
+                        or (getattr(tx, "bus2", None) is bus_term)]
+
+            line_names = []
+            for ln in all_ln:
+                b1 = getattr(ln, "bus1", None)
+                b2 = getattr(ln, "bus2", None)
+                if b1 is bus_term or b2 is bus_term:
+                    line_names.append(ln.loc_name)
+                elif code in ln.loc_name and ln.loc_name not in line_names:
+                    line_names.append(ln.loc_name)
+
+            ASSOC[ld.loc_name] = {"bus": bus_name, "pv": pv_names, "tx": tx_names, "line": line_names}
+    print(f"4.7.0 ✅     Build Associations: {len(ASSOC)} loads mapped to bus/pv/tx/line.")
+    print()
+
+
+# 4.3 MAIN ENTRY POINT -------------------------------------------------------------------------------
+def run_simulation(pv_overrides=None):
     """
-    Multi-page PDF with summary tables and key charts.
+    Executes the full QDS simulation. Accepts optional PV inverter overrides.
+    Updates global RESULTS and ASSOC. Returns True if OK, False otherwise.
     """
-    import matplotlib.pyplot as plt                                         # plotting API for figures/axes
-    from matplotlib.backends.backend_pdf import PdfPages                    # context manager to assemble multi-page PDFs
+    if pv_overrides:
+        apply_pv_inverter_overrides(app, pv_overrides)
+    monitored = build_monitored_dict()
+    res, qds = prepare_quasi_dynamic(app, monitored)
 
-    ts = dt.datetime.now().strftime("%Y-%m-%d %H:%M")                       # timestamp string for the report header
+    print("4.1.0 ▶️    Execute QDS Begin.")
+    ok = run_quasi_dynamic(qds)
+    print(f"4.1.0 ✅     Execute QDS Status = {ok} -------------------------------")
+    print()
+    if not ok:
+        return False
 
-# 8.1.1 fig_table: small helper to create a landscape A4 page with a centred table
-    def fig_table(title, rows, col_labels):
-        fig = plt.figure(figsize=(11.69, 8.27))                             # A4 landscape in inches (297×210 mm)
-        fig.suptitle(title, fontsize=14)                                    # page title
-        ax = fig.add_subplot(111)                                           # single full-page axes
-        ax.axis("off")                                                      # hide axes frame/ticks
-        table = ax.table(cellText=rows, 
-                         colLabels=col_labels, loc="center")                # add the table widget
-        table.auto_set_font_size(False)                                     # control font size manually for consistency
-        table.set_fontsize(8)                                               # compact table font
-        table.scale(1, 1.4)                                                 # increase row height slightly for readability
-        return fig                                                          # return the fully built figure to be saved
+    extract_qds_results(app, res)
+    return True
 
-# 8.1.2 Page 1 — Overview & voltage limits (per bus)
-    rows = []                                                               # accumulate [bus, min, max, status] rows
-    for key, meta in PV_CONFIG.items():                                     # iterate configured suburbs
-        bus = meta["bus"]                                                   # PF bus name for this suburb
-        lim = results.get("limits", {}).get(bus)                            # limits dict for that bus
-        if not lim:
-            continue                                                        # skip if not present in the results
-        ok = "OK" if lim.get("ok") else "OUT"                               # text flag for status
-        rows.append([bus, f"{lim['u_min']:.4f}", 
-                     f"{lim['u_max']:.4f}", ok])                            # append a formatted row
-    rows.sort(key=lambda r: r[0])                                           # sort rows alphabetically by bus name
 
-    with PdfPages(pdf_path) as pdf:                                         # open the multipage PDF writer
-        fig1 = fig_table(                                                   # build the first page table
-            f"Ōtaki 24-h Summary — Voltage Limits (generated {ts})",
-            rows,
-            ["Bus", "Min pu", "Max pu", "Status"]
-        )
-        pdf.savefig(fig1); plt.close(fig1)                                  # write page then close the figure to free memory
-
-# 8.1.3 Page 2 — Top line & transformer loading (bars) # Lines: pick the top 15 by max loading %
-        line_items = sorted(                                                # (name, max_loading%) pairs sorted high→low
-            ((name, d["loading_max_pct"]) for name, d in results.get("lines", {}).items()),
-            key=lambda x: x[1], reverse=True
-        )[:15]
-        if line_items:                                                      # only draw if we have data
-            names, vals = zip(*line_items)                                  # split names and values
-            fig2 = plt.figure(figsize=(11.69, 8.27))                        # new A4 landscape figure
-            ax2 = fig2.add_subplot(111)                                     # single axes
-            ax2.set_title("Top Line Loading (%)")                           # chart title
-            ax2.bar(names, vals)                                            # vertical bar chart
-            ax2.set_xticklabels(names, rotation=60, ha="right")             # tilt labels to avoid overlap
-            ax2.set_ylabel("%")                                             # y-axis label
-            pdf.savefig(fig2); plt.close(fig2)                              # save and close
-
-        # Transformers: pick the top 10 by max loading %
-        trafo_items = sorted(                                               # (name, max_loading%) pairs sorted high→low
-            ((name, d["loading_max_pct"]) for name, d in results.get("trafos", {}).items()),
-            key=lambda x: x[1], reverse=True
-        )[:10]
-        if trafo_items:                                                     # only draw if we have data
-            names, vals = zip(*trafo_items)                                 # split names and values
-            fig3 = plt.figure(figsize=(11.69, 8.27))                        # new figure for trafos
-            ax3 = fig3.add_subplot(111)                                     # single axes
-            ax3.set_title("Top Transformer Loading (%)")                    # chart title
-            ax3.bar(names, vals)                                            # bar chart
-            ax3.set_xticklabels(names, rotation=60, ha="right")             # readable x labels
-            ax3.set_ylabel("%")                                             # y-axis label
-            pdf.savefig(fig3); plt.close(fig3)                              # save and close
-
-# 8.1.4 Page 3 — PV production (total) and system load time-series,         # Build a unified time axis from the first PV series we find
-        all_pv = results.get("pv", {})                                      # dict keyed by pv_key with series and metrics
-        time_axis = None                                                    # will hold [t0, t1, ...] in seconds
-        for d in all_pv.values():                                           # scan PV series
-            s = d.get("series_kW", [])                                      # list of (t, kW) tuples
-            if s:
-                time_axis = [t for t, _ in s]                               # copy the time stamps
-                break                                                       # stop after first non-empty series
-        total_pv = []                                                       # will hold summed PV across all sites
-        if time_axis:                                                       # only compute if we have a base axis
-            for i, t in enumerate(time_axis):                               # walk the time indices
-                tot = 0.0                                                   # running sum at this instant
-                for d in all_pv.values():                                   # sum over every PV series
-                    s = d.get("series_kW", [])
-                    if i < len(s) and abs(s[i][0] - t) < 1e-6:              # align on index and check timestamp tolerance
-                        tot += s[i][1]                                      # add kW at that instant
-                total_pv.append((t, tot))                                   # store (t, total_kW)
-
-        # Plot total PV vs hour
-        if total_pv:
-            fig4 = plt.figure(figsize=(11.69, 8.27))                        # new figure for PV time-series
-            ax4 = fig4.add_subplot(111)                                     # single axes
-            ax4.set_title("Total PV Production over 24h (kW)")              # chart title
-            ax4.plot([t/3600.0 for t, _ in total_pv], 
-                     [v for _, v in total_pv])                              # convert seconds→hours for x
-            ax4.set_xlabel("Hour")                                          # x-axis label
-            ax4.set_ylabel("kW")                                            # y-axis label
-            pdf.savefig(fig4); plt.close(fig4)                              # save and close
-
-        # Plot total system load vs hour
-        load_series = results.get("load", {}).get("total_series_kW", [])    # list of (t, kW)
-        if load_series:
-            fig5 = plt.figure(figsize=(11.69, 8.27))                        # new figure for load time-series
-            ax5 = fig5.add_subplot(111)                                     # single axes
-            ax5.set_title("Total System Load over 24h (kW)")                # chart title
-            ax5.plot([t/3600.0 for t, _ in load_series], 
-                     [v for _, v in load_series])                           # time in hours
-            ax5.set_xlabel("Hour")                                          # x-axis label
-            ax5.set_ylabel("kW")                                            # y-axis label
-            pdf.savefig(fig5); plt.close(fig5)                              # save and close
-
-# 8.1.5 Page 4 — Energy summary table (per PV + totals)
-        pv_rows = []                                                        # rows: [pv_key, energy_kWh, peak_kW]
-        tot_pv_kwh = 0.0                                                    # accumulator for total PV energy
-        for k, d in sorted(all_pv.items()):                                 # sorted for stable row order
-            e = float(d.get("e_kWh", 0.0))                                  # energy (kWh) from results
-            pmax = float(d.get("p_kw_max", 0.0))                            # peak kW from results
-            pv_rows.append([k, f"{e:.1f}", f"{pmax:.1f}"])                  # add formatted row
-            tot_pv_kwh += e                                                 # accumulate total PV energy
-        load_kwh = float(results.get("load", {}).get("total_e_kWh", 0.0))   # total system load energy (kWh)
-        pv_rows.append(["— Total PV —", f"{tot_pv_kwh:.1f}", ""])           # add a total PV row
-        pv_rows.append(["— Total Load —", f"{load_kwh:.1f}", ""])           # add a total Load row
-
-        fig6 = fig_table("Daily Energy (kWh) & PV Peaks (kW)", pv_rows, 
-                         ["PV Key", "Energy (kWh)", "Peak (kW)"])           # build the table page
-        pdf.savefig(fig6); plt.close(fig6)                                  # save the final page and close
+run_simulation()
